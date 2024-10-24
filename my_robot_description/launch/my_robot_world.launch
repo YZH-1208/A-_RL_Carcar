@@ -1,0 +1,20 @@
+<!-- my_robot_world.launch -->
+<launch>
+  <!-- 使用仿真时间 -->
+  <param name="use_sim_time" value="true"/>
+
+  <!-- 启动Gazebo服务器 -->
+  <node name="gazebo" pkg="gazebo_ros" type="gzserver" args="-s libgazebo_ros_api_plugin.so $(find my_robot_description)/worlds/1st_floor.world" output="screen"/>
+
+  <!-- 启动Gazebo客户端 -->
+  <node name="gazebo_gui" pkg="gazebo_ros" type="gzclient" output="screen"/>
+
+  <!-- 生成机器人模型 -->
+  <node name="spawn_model" pkg="gazebo_ros" type="spawn_model" args="-file $(find my_robot_description)/models/my_robot.sdf -sdf -model my_robot -x -5.3334 -y -0.3768 -z 2.2 -Y -0.0058" />
+
+  <!-- 启动RTAB发布节点 -->
+  <node name="rtab_publisher" pkg="my_robot_description" type="rtab_node_launch.py" output="screen">
+    <param name="use_sim_time" value="true"/>
+  </node>
+  
+</launch>

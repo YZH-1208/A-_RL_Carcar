@@ -1,0 +1,16 @@
+<launch>
+  <!-- Use simulated time -->
+  <param name="use_sim_time" value="true"/>
+
+  <!-- Start the RTAB-Map node -->
+  <node name="rtabmap" pkg="rtabmap_ros" type="rtabmap" output="screen">
+    <!-- RTAB-Map parameters -->
+    <param name="frame_id" value="base_link"/>
+    <param name="odom_frame_id" value="odom"/>
+    <param name="subscribe_scan" value="true"/>
+    <param name="subscribe_odom" value="false"/>
+    <param name="subscribe_depth" value="false"/>
+    <param name="subscribe_rgb" value="false"/>
+  </node>
+</launch>
+
