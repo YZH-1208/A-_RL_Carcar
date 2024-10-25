@@ -117,8 +117,9 @@ class PrioritizedMemory:
         self.priorities = torch.zeros((self.capacity,), dtype=torch.float32).cuda()
 
 class GazeboEnv:
-    def __init__(self):
+    def __init__(self, model):
         rospy.init_node('gazebo_rl_agent', anonymous=True)
+        self.model = model
         self.pub_cmd_vel = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
         self.pub_imu = rospy.Publisher('/imu/data', Imu, queue_size=10)
         self.sub_scan = rospy.Subscriber('/velodyne_points', PointCloud2, self.scan_callback)
@@ -144,6 +145,12 @@ class GazeboEnv:
 
         self.max_no_progress_steps = 10
         self.no_progress_steps = 0
+        
+        # 新增屬性，標記是否已計算過優化路徑
+        self.optimized_waypoints_calculated = False
+        self.optimized_waypoints = []  # 儲存優化後的路徑點
+
+        self.waypoint_failures = {i: 0 for i in range(len(self.waypoints))}
 
         # 加载SLAM地圖
         self.load_slam_map('/home/daniel/maps/my_map0924.yaml')
@@ -374,8 +381,14 @@ class GazeboEnv:
 
     def optimize_waypoints_with_a_star(self):
         """
-        使用 A* 算法來優化路徑點
+        使用 A* 算法來優化路徑點，但僅在尚未計算過時執行
         """
+        if self.optimized_waypoints_calculated:
+            rospy.loginfo("Using previously calculated optimized waypoints.")
+            self.waypoints = self.optimized_waypoints  # 使用已計算的優化路徑
+            return
+
+        rospy.loginfo("Calculating optimized waypoints for the first time using A*.")
         optimized_waypoints = []
         for i in range(len(self.waypoints) - 1):
             start_point = (self.waypoints[i][0], self.waypoints[i][1])
@@ -383,16 +396,12 @@ class GazeboEnv:
             optimized_point = self.a_star_optimize_waypoint(self.slam_map, start_point, goal_point)
             optimized_waypoints.append(optimized_point)
 
-        # 最終優化點
+        # 最後一個終點加入到優化後的路徑點列表中
         optimized_waypoints.append(self.waypoints[-1])
-
-        # 刪除過濾距離的步驟
-        # self.waypoints = self.filter_waypoints_by_distance(optimized_waypoints)
         
-        # 直接將優化點用作最終路徑
+        self.optimized_waypoints = optimized_waypoints
         self.waypoints = optimized_waypoints
-        self.current_waypoint_index = 0
-
+        self.optimized_waypoints_calculated = True  # 設定標記，表示已計算過
 
     def is_in_blind_spot(self, x, y, blind_spot_length=3.36):
         """
@@ -412,13 +421,6 @@ class GazeboEnv:
             if distance < min_distance:
                 min_distance = distance
         return min_distance
-
-    def smooth_waypoints(self, waypoints):
-        waypoints_2d = [(wp[0], wp[1]) for wp in waypoints]  # Only keep x and y coordinates
-        smoothed_points = self.bezier_curve(waypoints_2d)
-        smoothed_waypoints = [(pt[0], pt[1]) for pt in smoothed_points]  # No yaw involved
-        self.current_waypoint_index = 0
-        return smoothed_waypoints
     
     def bezier_curve(self, waypoints, n_points=100):
         waypoints = np.array(waypoints)
@@ -612,66 +614,84 @@ class GazeboEnv:
         reward = 0  # 初始化 reward
         # 取得當前機器人的位置
         robot_x, robot_y, robot_yaw = self.get_robot_position()
-        current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
 
+
+        current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
         # 判斷是否到達最終目標點
         if np.linalg.norm([robot_x - self.target_x, robot_y - self.target_y]) < 0.5:
             self.done = True
             reward += 10000  # 給予較高的獎勵表示成功到達終點
 
+        distance_to_waypoint = np.linalg.norm([robot_x - current_waypoint_x, robot_y - current_waypoint_y])
+        if distance_to_waypoint < REFERENCE_DISTANCE_TOLERANCE:
+            self.current_waypoint_index = min(self.current_waypoint_index + 1, len(self.waypoints) - 1)
+            current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
+
+        print("waypoint: ", self.current_waypoint_index)
         # 檢查是否發生碰撞
         if self.is_collision_detected():
             rospy.loginfo("Collision detected, resetting environment.")
             reward = -2000.0  # 碰撞懲罰
+            
             self.reset()  # 重置環境
             return self.state, reward, True, {}
 
-        # 計算與目標路徑點的距離
-        distance_to_goal = np.linalg.norm([current_waypoint_x - robot_x, current_waypoint_y - robot_y])
-
-        # 如果距離當前路徑點太遠，則跳到下一個路徑點
-        max_waypoint_distance = 5  # 你可以根據需要調整此閾值
-        if distance_to_goal > max_waypoint_distance:
-            self.current_waypoint_index += 1
-            if self.current_waypoint_index >= len(self.waypoints):
-                self.done = True
-                return self.state, 100, self.done, {}
-            return self.state, 0, False, {}
-
-        # 計算當前位置與上一個位置的移動距離
         if self.previous_robot_position is not None:
             distance_moved = np.linalg.norm([robot_x - self.previous_robot_position[0], robot_y - self.previous_robot_position[1]])
         else:
             distance_moved = 0  # 初次執行時設定為0
 
-        # 判斷是否接近當前路徑點
-        if distance_to_goal < REFERENCE_DISTANCE_TOLERANCE:
+        if distance_to_waypoint < REFERENCE_DISTANCE_TOLERANCE:
             self.no_progress_steps = 0  # 有進展則重置
-            self.current_waypoint_index += 1
-            if self.current_waypoint_index >= len(self.waypoints):
-                self.done = True
-                return self.state, 100, self.done, {}
         else:
             # 如果移動距離非常小，則累積無進展計數器
             if distance_moved < 0.01:
                 self.no_progress_steps += 1
                 if self.no_progress_steps >= self.max_no_progress_steps:
+                    self.waypoint_failures[self.current_waypoint_index] += 1  # 增加當前 waypoint 的失敗次數
+                    print('failure at point',self.current_waypoint_index)
                     rospy.loginfo("No progress detected, resetting environment.")
-                    reward = -100.0  # 無進展懲罰
+                    reward = -2000.0  # 無進展懲罰
                     self.reset()
                     return self.state, reward, True, {}
             else:
                 self.no_progress_steps = 0  # 有移動則重置計數器
 
-        # 更新 previous_robot_position
         self.previous_robot_position = (robot_x, robot_y)
 
-        # 使用純追蹤演算法來調整行動
-        action = self.calculate_action_pure_pursuit()
 
-        # 發送控制指令
-        linear_speed = np.clip(action[0], -2.0, 2.0)
-        steer_angle = np.clip(action[1], -0.6, 0.6)
+        # 檢查當前 waypoint 附近的範圍是否由深度學習控制
+        use_deep_rl_control = any(
+            self.waypoint_failures.get(i, 0) > 1  # 設定失敗閾值為 2 次
+            for i in range(max(0, self.current_waypoint_index - 3), min(len(self.waypoints), self.current_waypoint_index + 4))
+        )
+            
+
+        # 決定使用的控制方式
+        if use_deep_rl_control:
+            print('operate by RL')
+
+            if isinstance(self.state, np.ndarray):
+                self.state = torch.tensor(self.state, dtype=torch.float32).to(device) # 如果不是tensor格式  那轉成tensor格式
+            self.state = self.state.clone().detach().unsqueeze(0).to(device)
+            action = self.model.act(self.state)  # 使用深度學習模型計算 action
+            print("RL Action output:", action)  # 打印完整的 action 值
+            print("RL Action shape:", action.shape)  # 打印 action 的形狀   
+            # 發送控制指令
+            linear_speed = np.clip(action[0,0].item(), -2.0, 2.0)
+            steer_angle = np.clip(action[0,1].item(), -0.6, 0.6)
+
+        else:
+            action = self.calculate_action_pure_pursuit()  # 使用 pure pursuit 演算法計算 action
+            print("A* Action output:", action)  # 打印完整的 action 值
+            print("A* Action shape:", action.shape)  # 打印 action 的形狀      
+            linear_speed = np.clip(action[0], -2.0, 2.0)
+            steer_angle = np.clip(action[1], -0.6, 0.6)
+
+        
+
+        print(linear_speed)
+        print(steer_angle)
 
         twist = Twist()
         twist.linear.x = linear_speed
@@ -687,6 +707,7 @@ class GazeboEnv:
         reward, _ = self.calculate_reward(current_waypoint_x, current_waypoint_y)
 
         return self.state, reward, self.done, {}
+
 
     def reset(self):
         # 設置初始機器人位置和姿態
@@ -832,7 +853,7 @@ class GazeboEnv:
         lookahead_distance = 2.0 + 0.5 * linear_speed  # 根據速度調整前視距離
 
         # 定義角度範圍，以當前車輛的yaw為中心
-        angle_range = np.deg2rad(40)  # ±35度的範圍
+        angle_range = np.deg2rad(40)  # ±40度的範圍
         closest_index = None
         min_distance = float('inf')
 
@@ -866,7 +887,6 @@ class GazeboEnv:
             if cumulative_distance >= lookahead_distance:
                 target_index = i
                 break
-
         # 獲取前視點座標
         target_x, target_y = self.waypoints[target_index]
 
@@ -937,6 +957,7 @@ class ActorCritic(nn.Module):
         self.actor = nn.Linear(128, action_space)
         self.critic = nn.Linear(128, 1)
         self.actor_log_std = nn.Parameter(torch.zeros(1, action_space))
+        
 
     def _get_conv_output_size(self, shape):
         x = torch.zeros(1, *shape)
@@ -968,6 +989,8 @@ class ActorCritic(nn.Module):
         return action_mean, action_std, value
 
     def act(self, state):
+        if isinstance(state, np.ndarray):
+            state = torch.tensor(state, dtype=torch.float32).to(device)
         action_mean, action_std, _ = self(state)
         action = action_mean + action_std * torch.randn_like(action_std)
         action = torch.tanh(action)
@@ -1017,8 +1040,9 @@ def ppo_update(ppo_epochs, env, model, optimizer, memory, scaler):
             memory.update_priorities(indices, priorities)
 
 def main():
-    env = GazeboEnv()
+    env = GazeboEnv(None)
     model = ActorCritic(env.observation_space, env.action_space).to(device)
+    env.model = model
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
     scaler = GradScaler('cuda')
     memory = PrioritizedMemory(MEMORY_SIZE)
@@ -1036,32 +1060,24 @@ def main():
     best_test_reward = -np.inf
 
     for e in range(num_episodes):
-        # 在每個 episode 開始時優化路徑點
-        env.optimize_waypoints_with_a_star()
-
-        # 打印優化後的 waypoints
-        print(f"Optimized waypoints for episode {e}: {env.waypoints}")
+        if not env.optimized_waypoints_calculated:
+            env.optimize_waypoints_with_a_star()
 
         state = env.reset()
         state = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
         total_reward = 0
-
         start_time = time.time()
 
         for time_step in range(1500):
             action = model.act(state)
             action_np = action.detach().cpu().numpy()
-
             next_state, reward, done, _ = env.step(action_np)
             next_state = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0).to(device)
-
             memory.add(state.cpu().numpy(), action_np, reward, done, next_state.cpu().numpy())
-
             state = next_state
             total_reward += reward
 
             elapsed_time = time.time() - start_time
-
             if done or elapsed_time > 240:
                 if elapsed_time > 240:
                     reward -= 1000.0
