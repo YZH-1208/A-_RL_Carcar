@@ -63,15 +63,17 @@ class PrioritizedMemory:
     def sample(self, batch_size, beta=0.4):
         if self.position == 0:
             raise ValueError("No samples available in memory.")
-        
+
+        # Ensure all priorities are valid for sampling
         if len(self.memory) == self.capacity:
             priorities = self.priorities
         else:
             priorities = self.priorities[:self.position]
-        
+
+        # Handle NaN in priorities
         if torch.isnan(priorities).any():
             priorities = torch.nan_to_num(priorities, nan=0.0)
-        
+
         probabilities = priorities ** self.alpha
         total = probabilities.sum()
 
@@ -81,7 +83,6 @@ class PrioritizedMemory:
             probabilities = torch.ones_like(probabilities) / len(probabilities)
 
         indices = torch.multinomial(probabilities, batch_size, replacement=False).cuda()
-        
         samples = [self.memory[idx] for idx in indices if self.memory[idx] is not None]
 
         if len(samples) == 0 or any(sample is None for sample in samples):
@@ -92,6 +93,10 @@ class PrioritizedMemory:
 
         batch = list(zip(*samples))
         states, actions, rewards, dones, next_states = batch
+
+        # Ensure all states are 4D tensors
+        states = [s if s.dim() == 4 else s.view(1, 3, 64, 64) for s in states]
+        next_states = [ns if ns.dim() == 4 else ns.view(1, 3, 64, 64) for ns in next_states]
 
         return (
             torch.stack(states).to(device),
@@ -611,16 +616,13 @@ class GazeboEnv:
         return occupancy_grid
 
     def step(self, action):
-        reward = 0  # 初始化 reward
-        # 取得當前機器人的位置
+        reward = 0
         robot_x, robot_y, robot_yaw = self.get_robot_position()
-
-
         current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
-        # 判斷是否到達最終目標點
+
         if np.linalg.norm([robot_x - self.target_x, robot_y - self.target_y]) < 0.5:
             self.done = True
-            reward += 10000  # 給予較高的獎勵表示成功到達終點
+            reward += 10000
 
         distance_to_waypoint = np.linalg.norm([robot_x - current_waypoint_x, robot_y - current_waypoint_y])
         if distance_to_waypoint < REFERENCE_DISTANCE_TOLERANCE:
@@ -628,67 +630,51 @@ class GazeboEnv:
             current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
 
         print("waypoint: ", self.current_waypoint_index)
-        # 檢查是否發生碰撞
+
         if self.is_collision_detected():
             rospy.loginfo("Collision detected, resetting environment.")
-            reward = -2000.0  # 碰撞懲罰
-            
-            self.reset()  # 重置環境
+            reward = -2000.0
+            self.reset()
             return self.state, reward, True, {}
 
-        if self.previous_robot_position is not None:
-            distance_moved = np.linalg.norm([robot_x - self.previous_robot_position[0], robot_y - self.previous_robot_position[1]])
-        else:
-            distance_moved = 0  # 初次執行時設定為0
-
+        distance_moved = np.linalg.norm([robot_x - self.previous_robot_position[0], robot_y - self.previous_robot_position[1]]) if self.previous_robot_position else 0
         if distance_to_waypoint < REFERENCE_DISTANCE_TOLERANCE:
-            self.no_progress_steps = 0  # 有進展則重置
+            self.no_progress_steps = 0
+        elif distance_moved < 0.01:
+            self.no_progress_steps += 1
+            if self.no_progress_steps >= self.max_no_progress_steps:
+                self.waypoint_failures[self.current_waypoint_index] += 1
+                print('failure at point', self.current_waypoint_index)
+                rospy.loginfo("No progress detected, resetting environment.")
+                reward = -2000.0
+                self.reset()
+                return self.state, reward, True, {}
         else:
-            # 如果移動距離非常小，則累積無進展計數器
-            if distance_moved < 0.01:
-                self.no_progress_steps += 1
-                if self.no_progress_steps >= self.max_no_progress_steps:
-                    self.waypoint_failures[self.current_waypoint_index] += 1  # 增加當前 waypoint 的失敗次數
-                    print('failure at point',self.current_waypoint_index)
-                    rospy.loginfo("No progress detected, resetting environment.")
-                    reward = -2000.0  # 無進展懲罰
-                    self.reset()
-                    return self.state, reward, True, {}
-            else:
-                self.no_progress_steps = 0  # 有移動則重置計數器
+            self.no_progress_steps = 0
 
         self.previous_robot_position = (robot_x, robot_y)
 
-
-        # 檢查當前 waypoint 附近的範圍是否由深度學習控制
         use_deep_rl_control = any(
-            self.waypoint_failures.get(i, 0) > 1  # 設定失敗閾值為 2 次
+            self.waypoint_failures.get(i, 0) > 1
             for i in range(max(0, self.current_waypoint_index - 3), min(len(self.waypoints), self.current_waypoint_index + 4))
         )
-            
 
-        # 決定使用的控制方式
         if use_deep_rl_control:
             print('operate by RL')
-
             if isinstance(self.state, np.ndarray):
-                self.state = torch.tensor(self.state, dtype=torch.float32).to(device) # 如果不是tensor格式  那轉成tensor格式
-            self.state = self.state.clone().detach().unsqueeze(0).to(device)
-            action = self.model.act(self.state)  # 使用深度學習模型計算 action
-            print("RL Action output:", action)  # 打印完整的 action 值
-            print("RL Action shape:", action.shape)  # 打印 action 的形狀   
-            # 發送控制指令
-            linear_speed = np.clip(action[0,0].item(), -2.0, 2.0)
-            steer_angle = np.clip(action[0,1].item(), -0.6, 0.6)
+                self.state = torch.tensor(self.state, dtype=torch.float32).view(1, 3, 64, 64).to(device)
+            elif self.state.dim() != 4:
+                self.state = self.state.view(1, 3, 64, 64)
 
+            action = self.model.act(self.state)
+            print("RL Action output:", action)
+            linear_speed = np.clip(action[0, 0].item(), -2.0, 2.0)
+            steer_angle = np.clip(action[0, 1].item(), -0.6, 0.6)
         else:
-            action = self.calculate_action_pure_pursuit()  # 使用 pure pursuit 演算法計算 action
-            print("A* Action output:", action)  # 打印完整的 action 值
-            print("A* Action shape:", action.shape)  # 打印 action 的形狀      
+            action = self.calculate_action_pure_pursuit()
+            print("A* Action output:", action)
             linear_speed = np.clip(action[0], -2.0, 2.0)
             steer_angle = np.clip(action[1], -0.6, 0.6)
-
-        
 
         print(linear_speed)
         print(steer_angle)
@@ -698,7 +684,6 @@ class GazeboEnv:
         twist.angular.z = steer_angle
         self.pub_cmd_vel.publish(twist)
 
-        # 發送 IMU 數據
         imu_data = self.generate_imu_data()
         self.pub_imu.publish(imu_data)
 
@@ -730,7 +715,6 @@ class GazeboEnv:
         state_msg.twist.angular.y = 0.0
         state_msg.twist.angular.z = 0.0
 
-        # 重置機器人狀態
         rospy.wait_for_service('/gazebo/set_model_state')
         try:
             self.set_model_state(state_msg)
@@ -744,32 +728,33 @@ class GazeboEnv:
             rospy.loginfo("Using optimized waypoints for reset.")
         else:
             rospy.loginfo("No optimized waypoints found, generating new waypoints.")
-            self.waypoints = self.generate_waypoints()  # 如果還沒有優化過的路徑點，生成原始路徑
+            self.waypoints = self.generate_waypoints()
 
         self.current_waypoint_index = 0
         self.done = False
 
-        # 重置時，使用空的 LiDAR 資料生成占用格
         empty_lidar_data = PointCloud2()
         current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
         self.state = self.generate_occupancy_grid(empty_lidar_data, current_waypoint_x, current_waypoint_y)
 
-        # 停止機器人運動
         self.last_twist = Twist()
         self.pub_cmd_vel.publish(self.last_twist)
 
-        # 重置IMU數據
         imu_data = self.generate_imu_data()
         self.pub_imu.publish(imu_data)
 
-        # 重置內部狀態變量
         self.previous_yaw_error = 0
         self.no_progress_steps = 0
         self.previous_distance_to_goal = None
         self.collision_detected = False
 
-        return self.state
+        # Ensure the state is 4D tensor
+        if isinstance(self.state, np.ndarray):
+            self.state = torch.tensor(self.state, dtype=torch.float32).view(1, 3, 64, 64).to(device)
+        elif self.state.dim() != 4:
+            self.state = self.state.view(1, 3, 64, 64)
 
+        return self.state
 
 
     def calculate_reward(self, target_x, target_y):
@@ -989,8 +974,22 @@ class ActorCritic(nn.Module):
         return action_mean, action_std, value
 
     def act(self, state):
+        # 確保 state 是 tensor，如果是 numpy，轉換為 tensor
         if isinstance(state, np.ndarray):
             state = torch.tensor(state, dtype=torch.float32).to(device)
+
+        # 去除多餘維度直到 <= 4
+        while state.dim() > 4:
+            state = state.squeeze(0)
+
+        # 添加缺少的維度直到 = 4
+        while state.dim() < 4:
+            state = state.unsqueeze(0)
+
+        # 最終確認 state 是 4D
+        if state.dim() != 4:
+            raise ValueError(f"Expected state to be 4D, but got {state.dim()}D")
+
         action_mean, action_std, _ = self(state)
         action = action_mean + action_std * torch.randn_like(action_std)
         action = torch.tanh(action)
