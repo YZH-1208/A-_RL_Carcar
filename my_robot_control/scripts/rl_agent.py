@@ -618,18 +618,25 @@ class GazeboEnv:
     def step(self, action):
         reward = 0
         robot_x, robot_y, robot_yaw = self.get_robot_position()
-        current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
 
-        if np.linalg.norm([robot_x - self.target_x, robot_y - self.target_y]) < 0.5:
+        # 計算當前機器人位置與所有 waypoints 的距離，並找到距離最近的 waypoint 的索引
+        distances = [np.linalg.norm([robot_x - wp_x, robot_y - wp_y]) for wp_x, wp_y in self.waypoints]
+        closest_index = np.argmin(distances)
+        self.current_waypoint_index = closest_index
+
+        # 確認最近的 waypoint 是否與目標位置相同
+        current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
+        distance_to_goal = np.linalg.norm([robot_x - self.target_x, robot_y - self.target_y])
+        
+        # 如果達到最終目標點
+        if distance_to_goal < REFERENCE_DISTANCE_TOLERANCE:
             self.done = True
             reward += 10000
+        else:
+            # 根據距離的變化來給獎勵（具體獎勵設置可根據需求進行調整）
+            reward += max(0, 10 - distance_to_goal * 2)
 
-        distance_to_waypoint = np.linalg.norm([robot_x - current_waypoint_x, robot_y - current_waypoint_y])
-        if distance_to_waypoint < REFERENCE_DISTANCE_TOLERANCE:
-            self.current_waypoint_index = min(self.current_waypoint_index + 1, len(self.waypoints) - 1)
-            current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
-
-        print("waypoint: ", self.current_waypoint_index)
+        print("Current waypoint index:", self.current_waypoint_index)
 
         if self.is_collision_detected():
             rospy.loginfo("Collision detected, resetting environment.")
@@ -638,20 +645,7 @@ class GazeboEnv:
             return self.state, reward, True, {}
 
         distance_moved = np.linalg.norm([robot_x - self.previous_robot_position[0], robot_y - self.previous_robot_position[1]]) if self.previous_robot_position else 0
-        if distance_to_waypoint < REFERENCE_DISTANCE_TOLERANCE:
-            self.no_progress_steps = 0
-        elif distance_moved < 0.01:
-            self.no_progress_steps += 1
-            if self.no_progress_steps >= self.max_no_progress_steps:
-                self.waypoint_failures[self.current_waypoint_index] += 1
-                print('failure at point', self.current_waypoint_index)
-                rospy.loginfo("No progress detected, resetting environment.")
-                reward = -2000.0
-                self.reset()
-                return self.state, reward, True, {}
-        else:
-            self.no_progress_steps = 0
-
+        
         self.previous_robot_position = (robot_x, robot_y)
 
         use_deep_rl_control = any(
@@ -671,6 +665,24 @@ class GazeboEnv:
             linear_speed = np.clip(action[0, 0].item(), -2.0, 2.0)
             steer_angle = np.clip(action[0, 1].item(), -0.6, 0.6)
         else:
+            # 計算當前位置與 current_waypoint_index 的距離
+            robot_x, robot_y, _ = self.get_robot_position()
+            current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
+            distance_to_waypoint = np.linalg.norm([robot_x - current_waypoint_x, robot_y - current_waypoint_y])
+
+            if distance_moved < 0.05:
+                self.no_progress_steps += 1
+                if self.no_progress_steps >= self.max_no_progress_steps:
+                    self.waypoint_failures[self.current_waypoint_index] += 1
+                    print('failure at point', self.current_waypoint_index)
+                    rospy.loginfo("No progress detected, resetting environment.")
+                    reward = -2000.0
+                    self.reset()
+                    return self.state, reward, True, {}
+            else:
+                self.no_progress_steps = 0
+
+
             action = self.calculate_action_pure_pursuit()
             print("A* Action output:", action)
             linear_speed = np.clip(action[0], -2.0, 2.0)
