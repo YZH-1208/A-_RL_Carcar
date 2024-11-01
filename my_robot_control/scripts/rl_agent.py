@@ -634,7 +634,7 @@ class GazeboEnv:
             reward += 10000
         else:
             # 根據距離的變化來給獎勵（具體獎勵設置可根據需求進行調整）
-            reward += max(0, 10 - distance_to_goal * 2)
+            reward += max(0, 10000 - distance_to_goal * 500)
 
         print("Current waypoint index:", self.current_waypoint_index)
 
@@ -774,41 +774,37 @@ class GazeboEnv:
         reward = 0
         done = False
 
-        # # 將機器人的座標轉換為地圖上的坐標
-        # map_x = int((robot_x - self.map_origin[0]) / self.map_resolution)
-        # map_y = int((robot_y - self.map_origin[1]) / self.map_resolution)
+        # 將機器人的座標轉換為地圖上的坐標
+        map_x = int((robot_x - self.map_origin[0]) / self.map_resolution)
+        map_y = int((robot_y - self.map_origin[1]) / self.map_resolution)
 
         # map_y = 4000 - map_y
 
-        # # 檢查機器人座標是否在地圖範圍內
-        # if 0 <= map_x < 4000 and 0 <= map_y < 4000:
-        #     # 根據機器人在地圖上的位置給予不同的獎勵或懲罰
-        #     if self.slam_map[map_y, map_x] >= 250:
-        #         reward += 10  # 白色區域 (可走區域)，給予較大獎勵
-        #         print("On the road +10")
-        #     elif self.slam_map[map_y, map_x] <= 190:
-        #         reward -= 100  # 黑色區域 (障礙物)，給予懲罰
-        #         print("Hit obstacle -100")
-        #         done = True  # 碰到障礙物時，直接結束
-        #     elif self.slam_map[map_y, map_x] >190 and self.slam_map[map_y, map_x]<250:
-        #         reward += 5  # 灰色區域 (未知區域)，給予適當獎勵
-        #         print("In unknown area +5")
-        #     else:
-        #         reward -= 10  # 偏離地圖或無法識別的區域，給予懲罰
-        #         print("Not on the road -10")
-        # else:
-        #     reward -= 20  # 機器人在地圖範圍外，給予懲罰
-        #     print("Out of map bounds -20")
+        # 檢查機器人座標是否在地圖範圍內
+        if 0 <= map_x < 4000 and 0 <= map_y < 4000:
+            # 根據機器人在地圖上的位置給予不同的獎勵或懲罰
+            # if self.slam_map[map_y, map_x] >= 250:
+            #     reward += 10  # 白色區域 (可走區域)，給予較大獎勵
+            #     print("On the road +10")
+            if self.slam_map[map_y, map_x] <= 190:
+                reward -= 1000  # 黑色區域 (障礙物)，給予懲罰
+                print("Hit obstacle -1000")
+                done = True  # 碰到障礙物時，直接結束
+            elif self.slam_map[map_y, map_x] >190 and self.slam_map[map_y, map_x]<250:
+                reward -= 100  # 灰色區域 (未知區域)，給予適當獎勵
+                print("In unknown area -100")
+            else:
+                reward -= 100  # 偏離地圖或無法識別的區域，給予懲罰
+                print("Not on the road -100")
+        else:
+            reward -= 20  # 機器人在地圖範圍外，給予懲罰
+            print("Out of map bounds -20")
 
         # 計算方向誤差的獎勵
         direction_to_target = np.arctan2(target_y - robot_y, target_x - robot_x)
         yaw_diff = np.abs(direction_to_target - robot_yaw)
         yaw_diff = np.arctan2(np.sin(yaw_diff), np.cos(yaw_diff))  # 確保角度在[-pi, pi]範圍內
         reward += 10*max(0, 5 - yaw_diff * 5)  # 誤差越小，獎勵越大
-
-        # 計算距離目標點的獎勵
-        distance_to_goal = np.sqrt((target_x - robot_x) ** 2 + (target_y - robot_y) ** 2)
-        reward += max(0, 10 - distance_to_goal * 2)  # 距離越近，獎勵越高
 
         # 增加遠離障礙物的安全性獎勵
         if not self.is_point_near_obstacle(robot_x, robot_y, threshold=0.3):
