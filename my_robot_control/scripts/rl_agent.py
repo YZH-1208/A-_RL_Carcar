@@ -517,9 +517,8 @@ class GazeboEnv:
                 rospy.logwarn("current_waypoint_index out of range, resetting to last valid index.")
                 self.current_waypoint_index = len(self.waypoints) - 1
 
-            current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
-
-            self.state = self.generate_occupancy_grid(combined_pcl_data, current_waypoint_x, current_waypoint_y)
+            robot_x, robot_y, _ = self.get_robot_position()
+            self.state = self.generate_occupancy_grid(robot_x, robot_y)
 
             self.future_waypoints = self.waypoints[self.current_waypoint_index+1 : min(self.current_waypoint_index+1+7, len(self.waypoints))]
 
@@ -578,42 +577,32 @@ class GazeboEnv:
         points = np.asarray(cloud.points)
         return pc2.create_cloud_xyz32(header, points)
 
-    def generate_occupancy_grid(self, lidar_data, waypoint_x, waypoint_y, grid_size=0.05, map_size=100):
-        if lidar_data is None or not isinstance(lidar_data, PointCloud2):
-            rospy.logwarn("No LiDAR data available, returning empty occupancy grid.")
-            return np.zeros((4, 64, 64))
+    def generate_occupancy_grid(self, robot_x, robot_y, grid_size=0.05, map_size=100):
+        # 將機器人的座標轉換為地圖上的像素座標
+        img_x, img_y = self.gazebo_to_image_coords(robot_x, robot_y)
+        
+        # 計算64x64網格在圖片上的起始和結束索引
+        half_grid = 32  # 因為需要64x64的矩陣，所以邊長的一半是32
+        start_x = max(0, img_x - half_grid)
+        start_y = max(0, img_y - half_grid)
+        end_x = min(self.slam_map.shape[1], img_x + half_grid)
+        end_y = min(self.slam_map.shape[0], img_y + half_grid)
 
-        grid_size = float(grid_size)
-        map_size_in_grids = int(map_size / grid_size)
-        grid = np.zeros((map_size_in_grids, map_size_in_grids))
+        # 擷取圖片中的64x64區域
+        grid = np.zeros((64, 64), dtype=np.float32)
+        grid_slice = self.slam_map[start_y:end_y, start_x:end_x]
+        
+        # 填充grid，將超出地圖範圍的部分填充為0
+        grid[:grid_slice.shape[0], :grid_slice.shape[1]] = grid_slice
 
-        x_min, x_max = -map_size / 2, map_size / 2
-        y_min, y_max = -map_size / 2, map_size / 2
-
-        for point in pc2.read_points(lidar_data, field_names=("x", "y", "z"), skip_nans=True):
-            x = point[0]
-            y = point[1]
-
-            if x_min <= x <= x_max and y_min <= y <= y_max:
-                ix = int((x - x_min) / grid_size)
-                iy = int((y - y_min) / grid_size)
-
-                if 0 <= ix < grid.shape[1] and 0 <= iy < grid.shape[0]:
-                    grid[iy, ix] = 1
-                else:
-                    rospy.logwarn(f"Index out of bounds after filtering: ix={ix}, iy={iy}")
-            else:
-                rospy.logwarn(f"LiDAR point out of bounds after filtering: x={x}, y={y}")
-
-        grid = cv2.resize(grid, (64, 64), interpolation=cv2.INTER_LINEAR)
-
-        waypoint_grid = np.zeros((2, 64, 64))
-        waypoint_grid[0, :, :] = waypoint_x
-        waypoint_grid[1, :, :] = waypoint_y
-
-        occupancy_grid = np.vstack([grid[np.newaxis, :, :], waypoint_grid])
+        # 將當前機器人位置資訊添加到occupancy grid
+        occupancy_grid = np.zeros((3, 64, 64), dtype=np.float32)
+        occupancy_grid[0, :, :] = grid
+        occupancy_grid[1, :, :] = robot_x  # 機器人的x位置
+        occupancy_grid[2, :, :] = robot_y  # 機器人的y位置
 
         return occupancy_grid
+
 
     def step(self, action):
         reward = 0
@@ -745,9 +734,8 @@ class GazeboEnv:
         self.current_waypoint_index = 0
         self.done = False
 
-        empty_lidar_data = PointCloud2()
-        current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
-        self.state = self.generate_occupancy_grid(empty_lidar_data, current_waypoint_x, current_waypoint_y)
+        robot_x, robot_y,_ = self.get_robot_position()
+        self.state = self.generate_occupancy_grid(robot_x, robot_y)
 
         self.last_twist = Twist()
         self.pub_cmd_vel.publish(self.last_twist)

@@ -38,3 +38,6 @@ waypoint 算法有問題  現在是當 現在的點距離近的點<0.65 那curre
 # 1030
 
 改好current_waypoint_index的問題了  但訓練資料  以及reward還沒弄好
+
+# 1109 
+把輸入到捲機的資料改好了  之後可能要改一下actorcritic  之前是用reward 和 done 來判斷  或許可以改成 reward 和 與牆壁距離來判斷
