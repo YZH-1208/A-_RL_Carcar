@@ -127,8 +127,6 @@ class GazeboEnv:
         self.model = model
         self.pub_cmd_vel = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
         self.pub_imu = rospy.Publisher('/imu/data', Imu, queue_size=10)
-        self.sub_scan = rospy.Subscriber('/velodyne_points', PointCloud2, self.scan_callback)
-        self.sub_collision_chassis = rospy.Subscriber('/my_robot/bumper_data', ContactsState, self.collision_callback)
         self.set_model_state = rospy.ServiceProxy('/gazebo/set_model_state', SetModelState)
         self.get_model_state = rospy.ServiceProxy('/gazebo/get_model_state', GetModelState)
         self.listener = tf.TransformListener()
@@ -145,8 +143,6 @@ class GazeboEnv:
         self.collision_detected = False
         self.previous_robot_position = None  # 初始化 previous_robot_position 為 None
         self.previous_distance_to_goal = None  # 初始化 previous_distance_to_goal 為 None
-
-        self.lidar_data = None  # 初始化 lidar_data，避免 AttributeError
 
         self.max_no_progress_steps = 10
         self.no_progress_steps = 0
@@ -408,25 +404,7 @@ class GazeboEnv:
         self.waypoints = optimized_waypoints
         self.optimized_waypoints_calculated = True  # 設定標記，表示已計算過
 
-    def is_in_blind_spot(self, x, y, blind_spot_length=3.36):
-        """
-        檢查給定的點是否位於車輛的盲區內
-        """
-        blind_spot_edges = self.calculate_blind_spot_edge_distances()
-        min_distance_to_edges = min(blind_spot_edges)
 
-        # 如果距離小於盲區長度，則該點在盲區內
-        return min_distance_to_edges < blind_spot_length
-
-    # 用於計算當前點與最近障礙物之間的距離
-    def calculate_distance_to_nearest_obstacle(self, x, y):
-        min_distance = float('inf')
-        for point in pc2.read_points(self.lidar_data, field_names=("x", "y", "z"), skip_nans=True):
-            distance = np.sqrt((point[0] - x) ** 2 + (point[1] - y) ** 2)
-            if distance < min_distance:
-                min_distance = distance
-        return min_distance
-    
     def bezier_curve(self, waypoints, n_points=100):
         waypoints = np.array(waypoints)
         n = len(waypoints) - 1
@@ -441,39 +419,6 @@ class GazeboEnv:
             curve += np.outer(bernstein_poly(i, n, t), waypoints[i])
 
         return curve
-
-    def is_point_near_obstacle(self, x, y, threshold=0.25):
-        if self.lidar_data is None:
-            rospy.logwarn("LiDAR data is not available yet.")
-            return False
-
-        min_distance_to_obstacle = float('inf')
-        for point in pc2.read_points(self.lidar_data, field_names=("x", "y", "z"), skip_nans=True):
-            distance = np.sqrt((point[0] - x)**2 + (point[1] - y)**2)
-            if distance < min_distance_to_obstacle:
-                min_distance_to_obstacle = distance
-
-        return min_distance_to_obstacle < threshold
-    
-    def calculate_blind_spot_edge_distances(self):
-        # 计算车辆的边缘距离，同时考虑盲区
-        blind_spot_length = 3.36  # 根据上面的计算结果，盲区长度为 3.36 米
-        vehicle_edges = [
-            (1.0, 0),    # 前方边缘
-            (-1.0, 0),   # 后方边缘
-            (0, 0.5),    # 左侧边缘
-            (0, -0.5)    # 右侧边缘
-        ]
-        
-        edge_distances = []
-        for edge in vehicle_edges:
-            edge_x, edge_y = edge
-            distance = self.calculate_distance_to_nearest_obstacle(edge_x, edge_y)
-            if distance < blind_spot_length:
-                distance = blind_spot_length  # 如果障碍物在盲区内，设定为盲区距离
-            edge_distances.append(distance)
-        
-        return edge_distances
 
     def collision_callback(self, data):
         if len(data.states) > 0:
@@ -507,50 +452,11 @@ class GazeboEnv:
 
         return imu_data
 
-    def scan_callback(self, data):
-        # 确保数据有效
-        if data is not None and self.is_valid_data(data):
-            self.lidar_data = data
-            combined_pcl_data = self.accumulate_lidar_data([data])
-
-            if self.current_waypoint_index >= len(self.waypoints):
-                rospy.logwarn("current_waypoint_index out of range, resetting to last valid index.")
-                self.current_waypoint_index = len(self.waypoints) - 1
-
-            robot_x, robot_y, _ = self.get_robot_position()
-            self.state = self.generate_occupancy_grid(robot_x, robot_y)
-
-            self.future_waypoints = self.waypoints[self.current_waypoint_index+1 : min(self.current_waypoint_index+1+7, len(self.waypoints))]
-
-        else:
-            rospy.logwarn("Received invalid or empty LiDAR data")
-
     def is_valid_data(self, data):
         for point in pc2.read_points(data, field_names=("x", "y", "z"), skip_nans=True):
             if point[0] != 0.0 or point[1] != 0.0 or point[2] != 0.0:
                 return True
         return False
-
-    def accumulate_lidar_data(self, lidar_buffer):
-        combined_points = []
-        for data in lidar_buffer:
-            points_list = []
-            for point in pc2.read_points(data, field_names=("x", "y", "z"), skip_nans=True):
-                if point[0] == 0.0 and point[1] == 0.0 and point[2] == 0.0:
-                    continue
-
-                point_transformed = self.transform_point(point, 'my_robot/velodyne', 'chassis')
-                points_list.append(point_transformed)
-            combined_points.extend(points_list)
-
-        if len(combined_points) == 0:
-            rospy.logwarn("No points collected after transformation")
-            return PointCloud2()
-
-        combined_pcl = o3d.geometry.PointCloud()
-        combined_pcl.points = o3d.utility.Vector3dVector(np.array(combined_points, dtype=np.float32))
-
-        return self.convert_open3d_to_ros(combined_pcl)
 
     def transform_point(self, point, from_frame, to_frame):
         try:
@@ -607,6 +513,7 @@ class GazeboEnv:
     def step(self, action):
         reward = 0
         robot_x, robot_y, robot_yaw = self.get_robot_position()
+        self.state = self.generate_occupancy_grid(robot_x, robot_y)
 
         # 計算當前機器人位置與所有 waypoints 的距離，並找到距離最近的 waypoint 的索引
         distances = [np.linalg.norm([robot_x - wp_x, robot_y - wp_y]) for wp_x, wp_y in self.waypoints]
@@ -624,8 +531,6 @@ class GazeboEnv:
         else:
             # 根據距離的變化來給獎勵（具體獎勵設置可根據需求進行調整）
             reward += max(0, 10000 - distance_to_goal * 500)
-
-        print("Current waypoint index:", self.current_waypoint_index)
 
         if self.is_collision_detected():
             rospy.loginfo("Collision detected, resetting environment.")
@@ -677,8 +582,8 @@ class GazeboEnv:
             linear_speed = np.clip(action[0], -2.0, 2.0)
             steer_angle = np.clip(action[1], -0.6, 0.6)
 
-        print(linear_speed)
-        print(steer_angle)
+        # print(linear_speed)
+        # print(steer_angle)
 
         twist = Twist()
         twist.linear.x = linear_speed
@@ -692,10 +597,15 @@ class GazeboEnv:
 
         reward, _ = self.calculate_reward(current_waypoint_x, current_waypoint_y)
 
+        print(reward)
         return self.state, reward, self.done, {}
 
 
     def reset(self):
+
+        robot_x, robot_y,_ = self.get_robot_position()
+        self.state = self.generate_occupancy_grid(robot_x, robot_y)
+
         # 設置初始機器人位置和姿態
         yaw = -0.0053
         quaternion = quaternion_from_euler(0.0, 0.0, yaw)
@@ -733,9 +643,6 @@ class GazeboEnv:
 
         self.current_waypoint_index = 0
         self.done = False
-
-        robot_x, robot_y,_ = self.get_robot_position()
-        self.state = self.generate_occupancy_grid(robot_x, robot_y)
 
         self.last_twist = Twist()
         self.pub_cmd_vel.publish(self.last_twist)
@@ -776,29 +683,23 @@ class GazeboEnv:
             #     print("On the road +10")
             if self.slam_map[map_y, map_x] <= 190:
                 reward -= 1000  # 黑色區域 (障礙物)，給予懲罰
-                print("Hit obstacle -1000")
+                # print("Hit obstacle -1000")
                 done = True  # 碰到障礙物時，直接結束
             elif self.slam_map[map_y, map_x] >190 and self.slam_map[map_y, map_x]<250:
                 reward -= 100  # 灰色區域 (未知區域)，給予適當獎勵
-                print("In unknown area -100")
+                # print("In unknown area -100")
             else:
                 reward -= 100  # 偏離地圖或無法識別的區域，給予懲罰
-                print("Not on the road -100")
+                # print("Not on the road -100")
         else:
             reward -= 20  # 機器人在地圖範圍外，給予懲罰
-            print("Out of map bounds -20")
+            # print("Out of map bounds -20")
 
         # 計算方向誤差的獎勵
         direction_to_target = np.arctan2(target_y - robot_y, target_x - robot_x)
         yaw_diff = np.abs(direction_to_target - robot_yaw)
         yaw_diff = np.arctan2(np.sin(yaw_diff), np.cos(yaw_diff))  # 確保角度在[-pi, pi]範圍內
         reward += 10*max(0, 5 - yaw_diff * 5)  # 誤差越小，獎勵越大
-
-        # 增加遠離障礙物的安全性獎勵
-        if not self.is_point_near_obstacle(robot_x, robot_y, threshold=0.3):
-            reward += 50  # 距離障礙物較遠時，給予安全性獎勵
-        else:
-            reward -= 500  # 距離障礙物較近時，給予懲罰
 
         return reward, done
 
@@ -1089,7 +990,7 @@ def main():
             torch.save(model.state_dict(), best_model_path)
             print(f"New best model saved with reward: {best_test_reward}")
 
-        if e % 20 == 0:
+        if e % 5 == 0:
             torch.save(model.state_dict(), model_path)
             print(f"Model saved after {e} episodes.")
 
