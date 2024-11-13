@@ -137,6 +137,7 @@ class GazeboEnv:
         self.target_x = -5.3334
         self.target_y = -0.3768
         self.waypoints = self.generate_waypoints()
+        self.waypoint_distances = self.calculate_waypoint_distances()   # 計算一整圈機器任要奏的大致距離
         self.current_waypoint_index = 0
         self.last_twist = Twist()
         self.epsilon = 0.05
@@ -335,6 +336,19 @@ class GazeboEnv:
         ]
         return waypoints
     
+    def calculate_waypoint_distances(self):
+        """
+        計算每對相鄰 waypoint 之間的距離，並返回一個距離列表。
+        """
+        distances = []
+        for i in range(len(self.waypoints) - 1):
+            start_wp = self.waypoints[i]
+            next_wp = self.waypoints[i + 1]
+            distance = np.linalg.norm([next_wp[0] - start_wp[0], next_wp[1] - start_wp[1]])
+            distances.append(distance)
+        return distances
+
+
     def gazebo_to_image_coords(self, gazebo_x, gazebo_y):
         img_x = 2000 + gazebo_x * 20
         img_y = 2000 - gazebo_y * 20
@@ -427,9 +441,6 @@ class GazeboEnv:
         else:
             self.collision_detected = False
 
-    def is_collision_detected(self):
-        return self.collision_detected
-
     def generate_imu_data(self):
         imu_data = Imu()
         imu_data.header.stamp = rospy.Time.now()
@@ -518,28 +529,17 @@ class GazeboEnv:
         # 計算當前機器人位置與所有 waypoints 的距離，並找到距離最近的 waypoint 的索引
         distances = [np.linalg.norm([robot_x - wp_x, robot_y - wp_y]) for wp_x, wp_y in self.waypoints]
         closest_index = np.argmin(distances)
-        self.current_waypoint_index = closest_index
+        if closest_index > self.current_waypoint_index:
+            distance_reward = sum(self.waypoint_distances[self.current_waypoint_index:closest_index])
+            reward += distance_reward * 100
+            self.current_waypoint_index = closest_index
+            print('distance to goal +', reward)
+        # self.current_waypoint_index = closest_index
 
         # 確認最近的 waypoint 是否與目標位置相同
         current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
-        distance_to_goal = np.linalg.norm([robot_x - self.target_x, robot_y - self.target_y])
-        
-        # 如果達到最終目標點
-        if distance_to_goal < REFERENCE_DISTANCE_TOLERANCE:
-            self.done = True
-            reward += 10000
-        else:
-            # 根據距離的變化來給獎勵（具體獎勵設置可根據需求進行調整）
-            reward += max(0, 10000 - distance_to_goal * 500)
-
-        if self.is_collision_detected():
-            rospy.loginfo("Collision detected, resetting environment.")
-            reward = -2000.0
-            self.reset()
-            return self.state, reward, True, {}
 
         distance_moved = np.linalg.norm([robot_x - self.previous_robot_position[0], robot_y - self.previous_robot_position[1]]) if self.previous_robot_position else 0
-        
         self.previous_robot_position = (robot_x, robot_y)
 
         use_deep_rl_control = any(
@@ -558,13 +558,25 @@ class GazeboEnv:
             print("RL Action output:", action)
             linear_speed = np.clip(action[0, 0].item(), -2.0, 2.0)
             steer_angle = np.clip(action[0, 1].item(), -0.6, 0.6)
+
+            if distance_moved < 0.05:
+                self.no_progress_steps += 1
+                if self.no_progress_steps >= self.max_no_progress_steps:
+                    print('failure at point', self.current_waypoint_index)
+                    rospy.loginfo("No progress detected, resetting environment.")
+                    reward = -2000.0
+                    self.reset()
+                    return self.state, reward, True, {}
+            else:
+                self.no_progress_steps = 0
+
         else:
             # 計算當前位置與 current_waypoint_index 的距離
             robot_x, robot_y, _ = self.get_robot_position()
             current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
             distance_to_waypoint = np.linalg.norm([robot_x - current_waypoint_x, robot_y - current_waypoint_y])
 
-            if distance_moved < 0.05:
+            if distance_moved < 0.03:
                 self.no_progress_steps += 1
                 if self.no_progress_steps >= self.max_no_progress_steps:
                     self.waypoint_failures[self.current_waypoint_index] += 1
@@ -579,7 +591,7 @@ class GazeboEnv:
 
             action = self.calculate_action_pure_pursuit()
             print("A* Action output:", action)
-            linear_speed = np.clip(action[0], -2.0, 2.0)
+            linear_speed = np.clip(action[0], -2.0, 3.0)
             steer_angle = np.clip(action[1], -0.6, 0.6)
 
         # print(linear_speed)
@@ -595,7 +607,7 @@ class GazeboEnv:
 
         rospy.sleep(0.1)
 
-        reward, _ = self.calculate_reward(current_waypoint_x, current_waypoint_y)
+        reward, _ = self.calculate_reward(robot_x, robot_y, reward, self.state)
 
         print(reward)
         return self.state, reward, self.done, {}
@@ -664,48 +676,20 @@ class GazeboEnv:
         return self.state
 
 
-    def calculate_reward(self, target_x, target_y):
-        robot_x, robot_y, robot_yaw = self.get_robot_position()
-        reward = 0
+    def calculate_reward(self, robot_x, robot_y, reward, state):
         done = False
-
         # 將機器人的座標轉換為地圖上的坐標
-        map_x = int((robot_x - self.map_origin[0]) / self.map_resolution)
-        map_y = int((robot_y - self.map_origin[1]) / self.map_resolution)
 
-        # map_y = 4000 - map_y
+        if isinstance(state, torch.Tensor):
+            state = state.cpu().numpy()
 
-        # 檢查機器人座標是否在地圖範圍內
-        if 0 <= map_x < 4000 and 0 <= map_y < 4000:
-            # 根據機器人在地圖上的位置給予不同的獎勵或懲罰
-            # if self.slam_map[map_y, map_x] >= 250:
-            #     reward += 10  # 白色區域 (可走區域)，給予較大獎勵
-            #     print("On the road +10")
-            if self.slam_map[map_y, map_x] <= 190:
-                reward -= 1000  # 黑色區域 (障礙物)，給予懲罰
-                # print("Hit obstacle -1000")
-                done = True  # 碰到障礙物時，直接結束
-            elif self.slam_map[map_y, map_x] >190 and self.slam_map[map_y, map_x]<250:
-                reward -= 100  # 灰色區域 (未知區域)，給予適當獎勵
-                # print("In unknown area -100")
-            else:
-                reward -= 100  # 偏離地圖或無法識別的區域，給予懲罰
-                # print("Not on the road -100")
-        else:
-            reward -= 20  # 機器人在地圖範圍外，給予懲罰
-            # print("Out of map bounds -20")
+        img_x, img_y = self.gazebo_to_image_coords(robot_x, robot_y)
+        obstacle_count = np.sum(state[0] <= 190)  # 假設state[0]為佔據網格通道
+        reward += 300 - obstacle_count * 5
 
-        # 計算方向誤差的獎勵
-        direction_to_target = np.arctan2(target_y - robot_y, target_x - robot_x)
-        yaw_diff = np.abs(direction_to_target - robot_yaw)
-        yaw_diff = np.arctan2(np.sin(yaw_diff), np.cos(yaw_diff))  # 確保角度在[-pi, pi]範圍內
-        reward += 10*max(0, 5 - yaw_diff * 5)  # 誤差越小，獎勵越大
+
 
         return reward, done
-
-
-
-
 
     def get_robot_position(self):
         try:
@@ -783,7 +767,7 @@ class GazeboEnv:
         elif np.abs(yaw_error) > 0.1:
             linear_speed = 1.0
         else:
-            linear_speed = 1.5
+            linear_speed = 2
 
         # 使用PD控制器調整轉向角度
         kp, kd = self.adjust_control_params(linear_speed)
@@ -924,7 +908,7 @@ def ppo_update(ppo_epochs, env, model, optimizer, memory, scaler):
                 surr2 = torch.clamp(ratio, 1 - CLIP_PARAM, 1 + CLIP_PARAM) * advantages
 
                 actor_loss = -torch.min(surr1, surr2).mean()
-                critic_loss = nn.MSELoss()(state_values, reward_batch + (1 - done_batch) * GAMMA * model(next_state_batch)[2].detach())
+                critic_loss = nn.MSELoss()(state_values.squeeze(-1), (reward_batch + (1 - done_batch) * GAMMA * model(next_state_batch)[2].detach()).unsqueeze(-1))
                 entropy_loss = -0.01 * dist_entropy.mean()  # 添加熵正则项
                 loss = actor_loss + 0.5 * critic_loss + entropy_loss
 
@@ -947,7 +931,7 @@ def main():
     best_model_path = "/home/daniel/catkin_ws/src/my_robot_control/scripts/best_model.pth"
     
     if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
         print("Loaded existing model.")
     else:
         print("Created new model.")
@@ -960,19 +944,34 @@ def main():
             env.optimize_waypoints_with_a_star()
 
         state = env.reset()
-        state = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
+        # 檢查 state 是否是 torch.Tensor，如果不是，則先將其轉為 tensor
+        if not isinstance(state, torch.Tensor):
+            state = torch.tensor(state, dtype=torch.float32)
+        state = state.clone().detach().unsqueeze(0).to(device)
+
         total_reward = 0
         start_time = time.time()
 
         for time_step in range(1500):
             action = model.act(state)
             action_np = action.detach().cpu().numpy()
+            
+            # 執行 step 並取得 next_state、reward 和 done
             next_state, reward, done, _ = env.step(action_np)
-            next_state = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0).to(device)
+
+            # 檢查 next_state 是否是 torch.Tensor，如果不是，則先將其轉為 tensor
+            if not isinstance(next_state, torch.Tensor):
+                next_state = torch.tensor(next_state, dtype=torch.float32)
+            next_state = next_state.clone().detach().unsqueeze(0).to(device)
+
+            # 將數據添加到記憶體
             memory.add(state.cpu().numpy(), action_np, reward, done, next_state.cpu().numpy())
+            
+            # 更新 state 和總分
             state = next_state
             total_reward += reward
 
+            # 檢查是否超過時間限制或達到終止條件
             elapsed_time = time.time() - start_time
             if done or elapsed_time > 240:
                 if elapsed_time > 240:
@@ -980,16 +979,19 @@ def main():
                     print(f"Episode {e} failed at time step {time_step}: time exceeded 240 sec.")
                 break
 
+        # 更新 PPO 和清除記憶體
         ppo_update(PPO_EPOCHS, env, model, optimizer, memory, scaler)
         memory.clear()
 
         print(f"Episode {e}, Total Reward: {total_reward}")
 
+        # 保存最佳模型
         if total_reward > best_test_reward:
             best_test_reward = total_reward
             torch.save(model.state_dict(), best_model_path)
             print(f"New best model saved with reward: {best_test_reward}")
 
+        # 每五次保存模型
         if e % 5 == 0:
             torch.save(model.state_dict(), model_path)
             print(f"Model saved after {e} episodes.")
@@ -998,6 +1000,7 @@ def main():
 
     torch.save(model.state_dict(), model_path)
     print("Final model saved.")
+
 
 if __name__ == '__main__':
     main()
