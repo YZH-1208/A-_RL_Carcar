@@ -594,9 +594,6 @@ class GazeboEnv:
             linear_speed = np.clip(action[0], -2.0, 3.0)
             steer_angle = np.clip(action[1], -0.6, 0.6)
 
-        # print(linear_speed)
-        # print(steer_angle)
-
         twist = Twist()
         twist.linear.x = linear_speed
         twist.angular.z = steer_angle
@@ -683,11 +680,17 @@ class GazeboEnv:
         if isinstance(state, torch.Tensor):
             state = state.cpu().numpy()
 
+        if state.ndim == 4:
+            # 对于 4 维情况，取第一个批次数据中的第一层
+            occupancy_grid = state[0, 0]
+        elif state.ndim == 3:
+            # 对于 3 维情况，直接取第一层
+            occupancy_grid = state[0]
+
         img_x, img_y = self.gazebo_to_image_coords(robot_x, robot_y)
-        obstacle_count = np.sum(state[0] <= 190)  # 假設state[0]為佔據網格通道
-        reward += 300 - obstacle_count * 5
-
-
+        obstacle_count = np.sum(occupancy_grid <= 190)  # 假設state[0]為佔據網格通道
+        print('obstacle_count',obstacle_count)
+        reward += 300 - obstacle_count*3
 
         return reward, done
 
