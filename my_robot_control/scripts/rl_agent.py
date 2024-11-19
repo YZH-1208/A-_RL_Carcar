@@ -530,11 +530,20 @@ class GazeboEnv:
         distances = [np.linalg.norm([robot_x - wp_x, robot_y - wp_y]) for wp_x, wp_y in self.waypoints]
         closest_index = np.argmin(distances)
         if closest_index > self.current_waypoint_index:
-            distance_reward = sum(self.waypoint_distances[self.current_waypoint_index:closest_index])
-            reward += distance_reward * 100
             self.current_waypoint_index = closest_index
-            print('distance to goal +', reward)
         # self.current_waypoint_index = closest_index
+
+        if self.previous_robot_position is not None:
+            distance_moved = np.linalg.norm([
+                robot_x - self.previous_robot_position[0],
+                robot_y - self.previous_robot_position[1]
+            ])
+            
+            reward += distance_moved * 100  # 每一步根据移动距离加分（权重100可调）
+            print("reward by distance_moved +" , distance_moved*100)
+        else:
+            distance_moved = 0
+
 
         # 確認最近的 waypoint 是否與目標位置相同
         current_waypoint_x, current_waypoint_y = self.waypoints[self.current_waypoint_index]
@@ -889,6 +898,7 @@ class ActorCritic(nn.Module):
         dist_entropy = dist.entropy().sum(dim=-1, keepdim=True)
         return action_log_probs, value, dist_entropy
 
+
 def ppo_update(ppo_epochs, env, model, optimizer, memory, scaler):
     for _ in range(ppo_epochs):
         state_batch, action_batch, reward_batch, done_batch, next_state_batch, indices, weights = memory.sample(BATCH_SIZE)
@@ -904,15 +914,28 @@ def ppo_update(ppo_epochs, env, model, optimizer, memory, scaler):
         for _ in range(PPO_EPOCHS):
             with torch.amp.autocast('cuda'):
                 log_probs, state_values, dist_entropy = model.evaluate(state_batch, action_batch)
-                advantages = reward_batch + (1 - done_batch) * GAMMA * model(next_state_batch)[2].detach() - state_values
 
+                # 確保 reward_batch 和 state_values 都具有形狀 (batch_size, 1)
+                reward_batch = reward_batch.unsqueeze(-1) if reward_batch.dim() == 1 else reward_batch
+                done_batch = done_batch.unsqueeze(-1) if done_batch.dim() == 1 else done_batch
+                state_values = state_values.unsqueeze(-1) if state_values.dim() == 1 else state_values
+
+                # 計算 advantages
+                with torch.no_grad():
+                    next_state_values = model(next_state_batch)[2]
+                    next_state_values = next_state_values.unsqueeze(-1) if next_state_values.dim() == 1 else next_state_values
+                
+                target_values = reward_batch + (1 - done_batch) * GAMMA * next_state_values
+                advantages = target_values - state_values
+
+                # 計算 PPO 損失
                 ratio = (log_probs - old_log_probs).exp()
                 surr1 = ratio * advantages
                 surr2 = torch.clamp(ratio, 1 - CLIP_PARAM, 1 + CLIP_PARAM) * advantages
 
                 actor_loss = -torch.min(surr1, surr2).mean()
-                critic_loss = nn.MSELoss()(state_values.squeeze(-1), (reward_batch + (1 - done_batch) * GAMMA * model(next_state_batch)[2].detach()).unsqueeze(-1))
-                entropy_loss = -0.01 * dist_entropy.mean()  # 添加熵正则项
+                critic_loss = nn.MSELoss()(state_values, target_values)
+                entropy_loss = -0.01 * dist_entropy.mean()  # 添加熵正則項
                 loss = actor_loss + 0.5 * critic_loss + entropy_loss
 
             scaler.scale(loss).backward()
