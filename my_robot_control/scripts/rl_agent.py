@@ -522,10 +522,16 @@ class GazeboEnv:
 
 
     def step(self, action):
+        print("action shape", action.shape)
         reward = 0
         robot_x, robot_y, robot_yaw = self.get_robot_position()
-        self.state = self.generate_occupancy_grid(robot_x, robot_y)
 
+
+        linear_speed = np.clip(action[0,0], -2.0, 3.0)
+        steer_angle = np.clip(action[0,1], -0.6, 0.6)
+        print("linear speed = ",linear_speed, " steer angle = ", steer_angle)
+        self.state = self.generate_occupancy_grid(robot_x, robot_y)
+        
         # 計算當前機器人位置與所有 waypoints 的距離，並找到距離最近的 waypoint 的索引
         distances = [np.linalg.norm([robot_x - wp_x, robot_y - wp_y]) for wp_x, wp_y in self.waypoints]
         closest_index = np.argmin(distances)
