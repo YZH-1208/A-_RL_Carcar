@@ -20,6 +20,7 @@ import time
 from torch.amp import GradScaler
 import yaml
 from PIL import Image
+import random
 
 # 超參數
 REFERENCE_DISTANCE_TOLERANCE = 0.65
@@ -576,6 +577,14 @@ class GazeboEnv:
             reward += 10 # 给一个大的正向奖励
             self.reset()
             return self.state, reward, True, {}  # 重置环境
+
+        if self.current_waypoint_index < len(self.waypoints) and self.current_waypoint_index/3 == 0:
+            current_wp = self.waypoints[self.current_waypoint_index]
+            distance_to_wp = np.linalg.norm([robot_x - current_wp[0], robot_y - current_wp[1]])
+            if distance_to_wp < 0.5:  # 假設通過 waypoint 的距離閾值為 0.5
+                reward += 2  # 通過 waypoint 獎勵
+                print(f"[Reward] Waypoint {self.current_waypoint_index} reached, reward: {reward}")
+
         # 更新机器人位置
         if self.previous_robot_position is not None:
             distance_moved = np.linalg.norm([
@@ -926,11 +935,14 @@ class ActorCritic(nn.Module):
             raise ValueError(f"Expected state to be 4D, but got {state.dim()}D")
 
         action_mean, action_std, _ = self(state)
-        action = action_mean + action_std * torch.randn_like(action_std)
-        action = torch.tanh(action)
-        max_action = torch.tensor([2.0, 0.6], device=action.device)
-        min_action = torch.tensor([-2.0, -0.6], device=action.device)
-        action = min_action + (action + 1) * (max_action - min_action) / 2
+
+        noise = torch.randn_like(action_std)*0.2
+        noisy_action = action_mean + action_std*noise
+
+        noisy_action = torch.tanh(noisy_action)
+        max_action = torch.tensor([2.0, 0.6], device=noisy_action.device)
+        min_action = torch.tensor([-2.0, -0.6], device=noisy_action.device)
+        action = min_action + (noisy_action + 1) * (max_action - min_action) / 2
 
         if torch.isnan(action).any():
             raise ValueError("Nan detected in action output")
@@ -1026,7 +1038,7 @@ def ppo_update(ppo_epochs, env, model, optimizer, memory, scaler, batch_size):
                 # 計算損失
                 actor_loss = -torch.min(surr1, surr2).mean()
                 critic_loss = nn.MSELoss()(state_values, target_values)
-                entropy_loss = -0.01 * dist_entropy.mean()  # 熵正則項
+                entropy_loss = -0.1 * dist_entropy.mean()  # 熵正則項
 
                 loss = actor_loss + 0.5 * critic_loss + entropy_loss
                 print(f"[PPO Update] Losses - Actor: {actor_loss.item()}, Critic: {critic_loss.item()}, Entropy: {entropy_loss.item()}")
@@ -1071,6 +1083,18 @@ def _check_for_invalid_values(tensor, name):
     if torch.isnan(tensor).any() or torch.isinf(tensor).any():
         raise ValueError(f"[PPO Update] {name} contains invalid values (NaN or Inf).")
 
+def select_action_with_exploration(state, model, epsilon=0.2):
+    if random.random() < epsilon:
+        # 隨機選擇動作
+        action = torch.tensor([
+            random.uniform(-2.0, 2.0),  # 隨機線速度
+            random.uniform(-0.6, 0.6)  # 隨機角速度
+        ]).to(device)
+        print("[Exploration] Taking a random action:", action)
+    else:
+        # 使用模型的動作
+        action = model.act(state)
+    return action
 
 def main():
     env = GazeboEnv(None)
@@ -1116,7 +1140,7 @@ def main():
             print(f"Waypoint index: {env.current_waypoint_index}")
 
             if use_deep_rl_control:
-                action = model.act(state)
+                action = select_action_with_exploration(state, model, epsilon=0.1)
                 action_np = action.detach().cpu().numpy().flatten()
                 print(f"RL Action at waypoint {env.current_waypoint_index}: {action_np}")
             else:
