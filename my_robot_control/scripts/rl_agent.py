@@ -25,7 +25,7 @@ import random
 # 超參數
 REFERENCE_DISTANCE_TOLERANCE = 0.65
 MEMORY_SIZE = 10000
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 GAMMA = 0.99
 LEARNING_RATE = 0.0003
 PPO_EPOCHS = 5
@@ -578,7 +578,7 @@ class GazeboEnv:
             self.reset()
             return self.state, reward, True, {}  # 重置环境
 
-        if self.current_waypoint_index < len(self.waypoints) and self.current_waypoint_index/3 == 0:
+        if self.current_waypoint_index < len(self.waypoints):
             current_wp = self.waypoints[self.current_waypoint_index]
             distance_to_wp = np.linalg.norm([robot_x - current_wp[0], robot_y - current_wp[1]])
             if distance_to_wp < 0.5:  # 假設通過 waypoint 的距離閾值為 0.5
@@ -967,6 +967,7 @@ class ActorCritic(nn.Module):
         action_log_probs = dist.log_prob(action).sum(dim=-1, keepdim=True)
         dist_entropy = dist.entropy().sum(dim=-1, keepdim=True)
         return action_log_probs, value, dist_entropy
+
 def ppo_update(ppo_epochs, env, model, optimizer, memory, scaler, batch_size):
     print(f"[DEBUG] Starting PPO update with batch size: {batch_size}")
 
@@ -1055,7 +1056,7 @@ def ppo_update(ppo_epochs, env, model, optimizer, memory, scaler, batch_size):
         # 更新優先級
         priorities = (advantages.abs() + 1e-5).detach().cpu().numpy()
         memory.update_priorities(indices, priorities)
-
+        memory.clear()
         print(f"[PPO Update] Epoch {epoch} completed successfully.")
 
 def _adjust_dimensions(state_batch, next_state_batch):
@@ -1083,7 +1084,7 @@ def _check_for_invalid_values(tensor, name):
     if torch.isnan(tensor).any() or torch.isinf(tensor).any():
         raise ValueError(f"[PPO Update] {name} contains invalid values (NaN or Inf).")
 
-def select_action_with_exploration(state, model, epsilon=0.2):
+def select_action_with_exploration(state, model, epsilon=0.4):
     if random.random() < epsilon:
         # 隨機選擇動作
         action = torch.tensor([
@@ -1173,7 +1174,6 @@ def main():
         if use_deep_rl_control and len(memory.memory) > BATCH_SIZE:
             curren_batch_size = min(BATCH_SIZE, len(memory.memory))
             ppo_update(PPO_EPOCHS, env, model, optimizer, memory, scaler,batch_size = curren_batch_size)
-            memory.clear()
 
         print(f"Episode {e}, Total Reward: {total_reward}")
 
