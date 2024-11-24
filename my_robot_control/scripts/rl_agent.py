@@ -185,7 +185,7 @@ class GazeboEnv:
             png_path = map_metadata['image'].replace(".pgm", ".png")  # 修改為png檔案路徑
             
             # 使用 PIL 讀取PNG檔
-            png_image = Image.open(png_path).convert('L')
+            png_image = Image.open('/home/daniel/maps/my_map0924_2.png').convert('L')
             self.slam_map = np.array(png_image)  # 轉為NumPy陣列
 
 
@@ -372,8 +372,8 @@ class GazeboEnv:
         return int(img_x), int(img_y)
 
     def image_to_gazebo_coords(self, img_x, img_y):
-        gazebo_x = (img_x - 2000) / 20
-        gazebo_y = (2000 - img_y) / 20
+        gazebo_x = (img_x - 2000) / 20.0
+        gazebo_y = (2000 - img_y) / 20.0
         return gazebo_x, gazebo_y
 
     def a_star_optimize_waypoint(self, png_image, start_point, goal_point, grid_size=50):
@@ -630,7 +630,9 @@ class GazeboEnv:
         twist = Twist()
         twist.linear.x = linear_speed
         twist.angular.z = steer_angle
+        print('twist.linear.x = ', twist.linear.x,'twist.angular.z = ', twist.angular.z )
         self.pub_cmd_vel.publish(twist)
+        self.last_twist = twist
 
         imu_data = self.generate_imu_data()
         self.pub_imu.publish(imu_data)
@@ -805,7 +807,7 @@ class GazeboEnv:
         elif np.abs(yaw_error) > 0.1:
             linear_speed = 1.0
         else:
-            linear_speed = 2
+            linear_speed = 3
 
         # 使用PD控制器調整轉向角度
         kp, kd = self.adjust_control_params(linear_speed)
@@ -936,7 +938,7 @@ class ActorCritic(nn.Module):
 
         action_mean, action_std, _ = self(state)
 
-        noise = torch.randn_like(action_std)*0.2
+        noise = torch.randn_like(action_std)*0.01
         noisy_action = action_mean + action_std*noise
 
         noisy_action = torch.tanh(noisy_action)
@@ -967,6 +969,102 @@ class ActorCritic(nn.Module):
         action_log_probs = dist.log_prob(action).sum(dim=-1, keepdim=True)
         dist_entropy = dist.entropy().sum(dim=-1, keepdim=True)
         return action_log_probs, value, dist_entropy
+
+class DWA:
+    def __init__(self, goal):
+        self.max_speed = 2
+        self.max_yaw_rate = 0.6
+        self.max_accel = 1
+        self.max_dyaw_rate = 0.3
+        self.dt = 0.05
+        self.predict_time = 3.0
+        self.goal = goal
+        self.robot_radius = 1.5
+
+    def calc_dynamic_window(self, state):
+        # 當前速度限制
+        vs = [0, self.max_speed, -self.max_yaw_rate, self.max_yaw_rate]
+
+        # 動力學限制
+        vd = [
+            state[3] - self.max_accel * self.dt,
+            state[3] + self.max_accel * self.dt,
+            state[4] - self.max_dyaw_rate * self.dt,
+            state[4] + self.max_dyaw_rate * self.dt
+        ]
+
+        # 取交集
+        dw = [
+            max(vs[0], vd[0]), min(vs[1], vd[1]),
+            max(vs[2], vd[2]), min(vs[3], vd[3])
+        ]
+        return dw
+
+    def motion(self, state, control):
+        # 運動模型計算下一步
+        x, y, theta, v, omega = state
+        next_x = x + v * np.cos(theta) * self.dt
+        next_y = y + v * np.sin(theta) * self.dt
+        next_theta = theta + omega * self.dt
+        next_v = control[0]
+        next_omega = control[1]
+        return [next_x, next_y, next_theta, next_v, next_omega]
+
+    def calc_trajectory(self, state, control):
+        # 預測軌跡
+        trajectory = [state]
+        for _ in range(int(self.predict_time / self.dt)):
+            state = self.motion(state, control)
+            trajectory.append(state)
+        return np.array(trajectory)
+
+    def calc_score(self, trajectory, obstacles):
+        # 計算目標距離分數
+        x, y = trajectory[-1, 0], trajectory[-1, 1]
+        goal_dist = np.sqrt((self.goal[0] - x) ** 2 + (self.goal[1] - y) ** 2)
+        goal_score = -goal_dist
+
+        # 計算安全分數
+        clearance = float('inf')
+        for ox, oy in obstacles:
+            dist = np.sqrt((ox - x) ** 2 + (oy - y) ** 2)
+            clearance = min(clearance, dist)
+        if clearance < self.robot_radius:
+            clearance_score = -float('inf')  # 發生碰撞
+        else:
+            clearance_score = clearance
+
+        # 計算速度分數
+        speed_score = trajectory[-1, 3]  # 最終速度
+
+        return goal_score, clearance_score, speed_score
+
+    def plan(self, state, obstacles):
+        # 獲取動態窗口
+        dw = self.calc_dynamic_window(state)
+
+        # 遍歷動態窗口中的所有控制
+        best_trajectory = None
+        best_score = -float('inf')
+        best_control = [0.0, 0.0]
+
+        for v in np.arange(dw[0], dw[1], 0.1):  # 線速度範圍
+            for omega in np.arange(dw[2], dw[3], 0.1):  # 角速度範圍
+                # 模擬軌跡
+                control = [v, omega]
+                trajectory = self.calc_trajectory(state, control)
+
+                # 計算評分函數
+                goal_score, clearance_score, speed_score = self.calc_score(trajectory, obstacles)
+                total_score = goal_score * 0.4 + clearance_score * 0.5 + speed_score * 0.1
+
+                # 找到最佳控制
+                if total_score > best_score:
+                    best_score = total_score
+                    best_trajectory = trajectory
+                    best_control = control
+
+        return best_control, best_trajectory
 
 def ppo_update(ppo_epochs, env, model, optimizer, memory, scaler, batch_size):
     print(f"[DEBUG] Starting PPO update with batch size: {batch_size}")
@@ -1084,14 +1182,19 @@ def _check_for_invalid_values(tensor, name):
     if torch.isnan(tensor).any() or torch.isinf(tensor).any():
         raise ValueError(f"[PPO Update] {name} contains invalid values (NaN or Inf).")
 
-def select_action_with_exploration(state, model, epsilon=0.4):
+def select_action_with_exploration(env, state, model, epsilon=0.9, dwa=None, obstacles=None):
     if random.random() < epsilon:
-        # 隨機選擇動作
-        action = torch.tensor([
-            random.uniform(-2.0, 2.0),  # 隨機線速度
-            random.uniform(-0.6, 0.6)  # 隨機角速度
-        ]).to(device)
-        print("[Exploration] Taking a random action:", action)
+        if dwa is None or obstacles is None:
+            raise ValueError("DWA controller or obstacles is not provided")
+        print("[Exploration] Using DWA for action generation. ")
+
+        robot_x, robot_y, robot_yaw = env.get_robot_position()
+        current_speed = env.last_twist.linear.x
+        current_omega = env.last_twist.angular.z
+
+        state = [robot_x, robot_y, robot_yaw, current_speed, current_omega]
+        action, _ = dwa.plan(state, obstacles)  
+        action = torch.tensor(action, dtype=torch.float32).to(device)  # 確保格式正確
     else:
         # 使用模型的動作
         action = model.act(state)
@@ -1099,6 +1202,7 @@ def select_action_with_exploration(state, model, epsilon=0.4):
 
 def main():
     env = GazeboEnv(None)
+    dwa = DWA(goal=env.waypoints[env.current_waypoint_index + 5])
     model = ActorCritic(env.observation_space, env.action_space).to(device)
     env.model = model
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
@@ -1117,11 +1221,19 @@ def main():
     num_episodes = 1000000
     best_test_reward = -np.inf
 
+    # init the obstacle information
+    static_obstacles = []
+    for y in range(env.slam_map.shape[0]):
+        for x in range(env.slam_map.shape[1]):
+            if env.slam_map[y, x] < 190:
+                ox, oy = env.image_to_gazebo_coords(x, y)
+                static_obstacles.append((ox, oy))
+
     for e in range(num_episodes):
         if not env.optimized_waypoints_calculated:
             env.optimize_waypoints_with_a_star()
 
-        state = env.reset()
+        state = env.reset()   # 更新車子到初始點
         if not isinstance(state, torch.Tensor):
             state = torch.tensor(state, dtype=torch.float32)
         state = state.clone().detach().unsqueeze(0).to(device)
@@ -1129,7 +1241,14 @@ def main():
         total_reward = 0
         start_time = time.time()
 
-        for time_step in range(1500):
+        for time_step in range(1500):  # there will be no greater than 1500 actions per episode
+            
+            robot_x, robot_y, robot_yaw = env.get_robot_position()
+            print("robot_x = ", robot_x, "robot_y = ", robot_y, "robot_yaw = ", robot_yaw)
+            obstacles = [
+                (ox, oy) for ox, oy in static_obstacles
+                if np.sqrt((ox-robot_x)**2 + (oy - robot_y)**2) < 8.0  # 限制只取機器當前位置8米範圍的障礙物 
+            ]
             # 根据是否使用 RL 控制，决定动作
             failure_range = range(
                 max(0, env.current_waypoint_index - 3),
@@ -1138,10 +1257,9 @@ def main():
             use_deep_rl_control = any(
                 env.waypoint_failures.get(i, 0) > 1 for i in failure_range
             )
-            print(f"Waypoint index: {env.current_waypoint_index}")
 
             if use_deep_rl_control:
-                action = select_action_with_exploration(state, model, epsilon=0.1)
+                action = select_action_with_exploration(env, state, model, dwa=dwa, obstacles=obstacles)
                 action_np = action.detach().cpu().numpy().flatten()
                 print(f"RL Action at waypoint {env.current_waypoint_index}: {action_np}")
             else:
@@ -1159,7 +1277,6 @@ def main():
 
             state = next_state
             total_reward += reward
-
 
             state = (state - state.min()) / (state.max() - state.min() + 1e-5)  # 正規化到 [0, 1]
 
