@@ -1040,6 +1040,7 @@ class DWA:
         return goal_score, clearance_score, speed_score
 
     def plan(self, state, obstacles):
+        print("dwa goal: ", self.goal)
         # 獲取動態窗口
         dw = self.calc_dynamic_window(state)
 
@@ -1056,7 +1057,7 @@ class DWA:
 
                 # 計算評分函數
                 goal_score, clearance_score, speed_score = self.calc_score(trajectory, obstacles)
-                total_score = goal_score * 0.4 + clearance_score * 0.5 + speed_score * 0.1
+                total_score = goal_score * 0.8 + clearance_score * 0.5 + speed_score * 0.1
 
                 # 找到最佳控制
                 if total_score > best_score:
@@ -1249,6 +1250,10 @@ def main():
                 (ox, oy) for ox, oy in static_obstacles
                 if np.sqrt((ox-robot_x)**2 + (oy - robot_y)**2) < 8.0  # 限制只取機器當前位置8米範圍的障礙物 
             ]
+
+            lookahead_index = min(env.current_waypoint_index + 5, len(env.waypoint_distances)-1)
+            dwa.goal = env.waypoints[lookahead_index]
+            
             # 根据是否使用 RL 控制，决定动作
             failure_range = range(
                 max(0, env.current_waypoint_index - 3),
