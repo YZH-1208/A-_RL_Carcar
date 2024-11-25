@@ -21,6 +21,7 @@ from torch.amp import GradScaler
 import yaml
 from PIL import Image
 import random
+from sklearn.cluster import KMeans
 
 # 超參數
 REFERENCE_DISTANCE_TOLERANCE = 0.65
@@ -35,6 +36,12 @@ CONTROL_HORIZON = 10
 
 device = torch.device("cpu")
 Transition = namedtuple('Transition', ('state', 'action', 'reward', 'next_state', 'done'))
+
+def cluster_simplify(obstacles, n_clusters):
+    if len(obstacles) <= n_clusters:
+        return obstacles
+    kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(obstacles)
+    return kmeans.cluster_centers_.tolist()
 
 class PrioritizedMemory:
     def __init__(self, capacity):
@@ -976,10 +983,10 @@ class DWA:
         self.max_yaw_rate = 0.6
         self.max_accel = 1
         self.max_dyaw_rate = 0.3
-        self.dt = 0.05
+        self.dt = 0.2
         self.predict_time = 3.0
         self.goal = goal
-        self.robot_radius = 1.5
+        self.robot_radius = 1.0
 
     def calc_dynamic_window(self, state):
         # 當前速度限制
@@ -994,10 +1001,12 @@ class DWA:
         ]
 
         # 取交集
-        dw = [
-            max(vs[0], vd[0]), min(vs[1], vd[1]),
-            max(vs[2], vd[2]), min(vs[3], vd[3])
-        ]
+        # dw = [
+        #     max(vs[0], vd[0]), min(vs[1], vd[1]),
+        #     max(vs[2], vd[2]), min(vs[3], vd[3])
+        # ]
+        dw = vs
+        print('Dynamic window limits: ',dw)
         return dw
 
     def motion(self, state, control):
@@ -1008,6 +1017,7 @@ class DWA:
         next_theta = theta + omega * self.dt
         next_v = control[0]
         next_omega = control[1]
+        print(f"State: {state}, Control: {control}, Next state: {[next_x, next_y, next_theta, next_v, next_omega]}")
         return [next_x, next_y, next_theta, next_v, next_omega]
 
     def calc_trajectory(self, state, control):
@@ -1016,6 +1026,7 @@ class DWA:
         for _ in range(int(self.predict_time / self.dt)):
             state = self.motion(state, control)
             trajectory.append(state)
+        print("Trajectory points:", trajectory)
         return np.array(trajectory)
 
     def calc_score(self, trajectory, obstacles):
@@ -1036,28 +1047,30 @@ class DWA:
 
         # 計算速度分數
         speed_score = trajectory[-1, 3]  # 最終速度
-
+        print(f"Goal score: {goal_score}, Clearance score: {clearance_score}, Speed score: {speed_score}")
         return goal_score, clearance_score, speed_score
 
     def plan(self, state, obstacles):
         print("dwa goal: ", self.goal)
         # 獲取動態窗口
-        dw = self.calc_dynamic_window(state)
-
+        dw = self.calc_dynamic_window(state)  # 速度 角度限制
+        print("Calculated Dynamic Window:", dw)
         # 遍歷動態窗口中的所有控制
         best_trajectory = None
         best_score = -float('inf')
         best_control = [0.0, 0.0]
-
+        print("Dynamic Window", dw)
         for v in np.arange(dw[0], dw[1], 0.1):  # 線速度範圍
             for omega in np.arange(dw[2], dw[3], 0.1):  # 角速度範圍
+
                 # 模擬軌跡
                 control = [v, omega]
                 trajectory = self.calc_trajectory(state, control)
-
+                print("Generated trajectory length:", len(trajectory))
+                print("Trajectory example (first and last points):", trajectory[0], trajectory[-1])
                 # 計算評分函數
                 goal_score, clearance_score, speed_score = self.calc_score(trajectory, obstacles)
-                total_score = goal_score * 0.8 + clearance_score * 0.5 + speed_score * 0.1
+                total_score = goal_score * 0.7 + clearance_score * 0.2  + speed_score * 0.1
 
                 # 找到最佳控制
                 if total_score > best_score:
@@ -1065,6 +1078,8 @@ class DWA:
                     best_trajectory = trajectory
                     best_control = control
 
+        # print("goal score = ", goal_score, "safety score = ", clearance_score, "speed score = ", speed_score)
+        print(f"v: {v}, omega: {omega}, Total score: {total_score}")
         return best_control, best_trajectory
 
 def ppo_update(ppo_epochs, env, model, optimizer, memory, scaler, batch_size):
@@ -1183,7 +1198,7 @@ def _check_for_invalid_values(tensor, name):
     if torch.isnan(tensor).any() or torch.isinf(tensor).any():
         raise ValueError(f"[PPO Update] {name} contains invalid values (NaN or Inf).")
 
-def select_action_with_exploration(env, state, model, epsilon=0.9, dwa=None, obstacles=None):
+def select_action_with_exploration(env, state, model, epsilon=1.0, dwa=None, obstacles=None):
     if random.random() < epsilon:
         if dwa is None or obstacles is None:
             raise ValueError("DWA controller or obstacles is not provided")
@@ -1194,10 +1209,13 @@ def select_action_with_exploration(env, state, model, epsilon=0.9, dwa=None, obs
         current_omega = env.last_twist.angular.z
 
         state = [robot_x, robot_y, robot_yaw, current_speed, current_omega]
+        print('obstacles: ', obstacles)
+        print('state: ', state)
         action, _ = dwa.plan(state, obstacles)  
         action = torch.tensor(action, dtype=torch.float32).to(device)  # 確保格式正確
     else:
         # 使用模型的動作
+        print('action by RL')
         action = model.act(state)
     return action
 
@@ -1250,10 +1268,10 @@ def main():
                 (ox, oy) for ox, oy in static_obstacles
                 if np.sqrt((ox-robot_x)**2 + (oy - robot_y)**2) < 8.0  # 限制只取機器當前位置8米範圍的障礙物 
             ]
-
+            obstacles = cluster_simplify(obstacles, n_clusters=60)
             lookahead_index = min(env.current_waypoint_index + 5, len(env.waypoint_distances)-1)
             dwa.goal = env.waypoints[lookahead_index]
-            
+
             # 根据是否使用 RL 控制，决定动作
             failure_range = range(
                 max(0, env.current_waypoint_index - 3),
@@ -1263,13 +1281,13 @@ def main():
                 env.waypoint_failures.get(i, 0) > 1 for i in failure_range
             )
 
-            if use_deep_rl_control:
-                action = select_action_with_exploration(env, state, model, dwa=dwa, obstacles=obstacles)
-                action_np = action.detach().cpu().numpy().flatten()
-                print(f"RL Action at waypoint {env.current_waypoint_index}: {action_np}")
-            else:
-                action_np = env.calculate_action_pure_pursuit()
-                print(f"A* Action at waypoint {env.current_waypoint_index}: {action_np}")
+            # if use_deep_rl_control:
+            action = select_action_with_exploration(env, state, model, dwa=dwa, obstacles=obstacles)
+            action_np = action.detach().cpu().numpy().flatten()
+            print(f"RL Action at waypoint {env.current_waypoint_index}: {action_np}")
+            # else:
+            #     action_np = env.calculate_action_pure_pursuit()
+            #     print(f"A* Action at waypoint {env.current_waypoint_index}: {action_np}")
 
             next_state, reward, done, _ = env.step(action_np)
             if not isinstance(next_state, torch.Tensor):
