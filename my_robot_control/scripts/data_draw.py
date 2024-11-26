@@ -2,11 +2,22 @@ import csv
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from sklearn.cluster import KMeans
+import numpy as np
 
 def transform_coordinates(x, y):
     new_x = 2000 + x * 20
     new_y = 2000 - y * 20
     return new_x, new_y
+
+def grid_filter(obstacles, grid_size=0.5):
+    obstacles = np.array(obstacles)
+    # 按照 grid_size 取整
+    grid_indices = (obstacles // grid_size).astype(int)
+    # 找到唯一的网格
+    unique_indices = np.unique(grid_indices, axis=0)
+    # 返回网格中心点
+    filtered_points = unique_indices * grid_size + grid_size / 2
+    return filtered_points
 
 # Load the image
 img_path = '/home/daniel/maps/my_map0924_2.png'  # Example image path; replace as needed
@@ -21,8 +32,9 @@ def cluster_simplify(obstacles, n_clusters):
     kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(obstacles)
     return kmeans.cluster_centers_.tolist()
 
+
 # 使用示例
-astar_points = cluster_simplify(astar_points, n_clusters=60)
+astar_points = grid_filter(astar_points, grid_size=0.5)
 print(astar_points)
 fig, ax = plt.subplots(figsize=(12, 8))
 ax.imshow(img)

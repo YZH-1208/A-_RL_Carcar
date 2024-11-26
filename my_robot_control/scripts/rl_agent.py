@@ -37,11 +37,21 @@ CONTROL_HORIZON = 10
 device = torch.device("cpu")
 Transition = namedtuple('Transition', ('state', 'action', 'reward', 'next_state', 'done'))
 
-def cluster_simplify(obstacles, n_clusters):
-    if len(obstacles) <= n_clusters:
-        return obstacles
-    kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(obstacles)
-    return kmeans.cluster_centers_.tolist()
+# def cluster_simplify(obstacles, n_clusters):  沒用了
+#     if len(obstacles) <= n_clusters:
+#         return obstacles
+#     kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(obstacles)
+#     return kmeans.cluster_centers_.tolist()
+
+def grid_filter(obstacles, grid_size=0.5):
+    obstacles = np.array(obstacles)
+    # 按照 grid_size 取整
+    grid_indices = (obstacles // grid_size).astype(int)
+    # 找到唯一的网格
+    unique_indices = np.unique(grid_indices, axis=0)
+    # 返回网格中心点
+    filtered_points = unique_indices * grid_size + grid_size / 2
+    return filtered_points
 
 class PrioritizedMemory:
     def __init__(self, capacity):
@@ -1006,7 +1016,7 @@ class DWA:
         #     max(vs[2], vd[2]), min(vs[3], vd[3])
         # ]
         dw = vs
-        print('Dynamic window limits: ',dw)
+        # print('Dynamic window limits: ',dw)
         return dw
 
     def motion(self, state, control):
@@ -1017,7 +1027,7 @@ class DWA:
         next_theta = theta + omega * self.dt
         next_v = control[0]
         next_omega = control[1]
-        print(f"State: {state}, Control: {control}, Next state: {[next_x, next_y, next_theta, next_v, next_omega]}")
+        # print(f"State: {state}, Control: {control}, Next state: {[next_x, next_y, next_theta, next_v, next_omega]}")
         return [next_x, next_y, next_theta, next_v, next_omega]
 
     def calc_trajectory(self, state, control):
@@ -1026,7 +1036,7 @@ class DWA:
         for _ in range(int(self.predict_time / self.dt)):
             state = self.motion(state, control)
             trajectory.append(state)
-        print("Trajectory points:", trajectory)
+        # print("Trajectory points:", trajectory)
         return np.array(trajectory)
 
     def calc_score(self, trajectory, obstacles):
@@ -1047,7 +1057,7 @@ class DWA:
 
         # 計算速度分數
         speed_score = trajectory[-1, 3]  # 最終速度
-        print(f"Goal score: {goal_score}, Clearance score: {clearance_score}, Speed score: {speed_score}")
+        # print(f"Goal score: {goal_score}, Clearance score: {clearance_score}, Speed score: {speed_score}")
         return goal_score, clearance_score, speed_score
 
     def plan(self, state, obstacles):
@@ -1059,7 +1069,7 @@ class DWA:
         best_trajectory = None
         best_score = -float('inf')
         best_control = [0.0, 0.0]
-        print("Dynamic Window", dw)
+        # print("Dynamic Window", dw)
         for v in np.arange(dw[0], dw[1], 0.1):  # 線速度範圍
             for omega in np.arange(dw[2], dw[3], 0.1):  # 角速度範圍
 
@@ -1247,7 +1257,7 @@ def main():
             if env.slam_map[y, x] < 190:
                 ox, oy = env.image_to_gazebo_coords(x, y)
                 static_obstacles.append((ox, oy))
-
+ 
     for e in range(num_episodes):
         if not env.optimized_waypoints_calculated:
             env.optimize_waypoints_with_a_star()
@@ -1261,14 +1271,17 @@ def main():
         start_time = time.time()
 
         for time_step in range(1500):  # there will be no greater than 1500 actions per episode
-            
+            step_start_time = time.time()
+
             robot_x, robot_y, robot_yaw = env.get_robot_position()
             print("robot_x = ", robot_x, "robot_y = ", robot_y, "robot_yaw = ", robot_yaw)
+
             obstacles = [
                 (ox, oy) for ox, oy in static_obstacles
                 if np.sqrt((ox-robot_x)**2 + (oy - robot_y)**2) < 8.0  # 限制只取機器當前位置8米範圍的障礙物 
             ]
-            obstacles = cluster_simplify(obstacles, n_clusters=60)
+            obstacles = grid_filter(obstacles, grid_size=0.7)
+
             lookahead_index = min(env.current_waypoint_index + 5, len(env.waypoint_distances)-1)
             dwa.goal = env.waypoints[lookahead_index]
 
@@ -1286,10 +1299,11 @@ def main():
             action_np = action.detach().cpu().numpy().flatten()
             print(f"RL Action at waypoint {env.current_waypoint_index}: {action_np}")
             # else:
-            #     action_np = env.calculate_action_pure_pursuit()
-            #     print(f"A* Action at waypoint {env.current_waypoint_index}: {action_np}")
+            # action_np = env.calculate_action_pure_pursuit()
+            # print(f"A* Action at waypoint {env.current_waypoint_index}: {action_np}")
 
             next_state, reward, done, _ = env.step(action_np)
+
             if not isinstance(next_state, torch.Tensor):
                 next_state = torch.tensor(next_state, dtype=torch.float32)
             next_state = next_state.clone().detach().unsqueeze(0).to(device)
@@ -1309,6 +1323,9 @@ def main():
                     reward -= 10.0
                     print(f"Episode {e} failed at time step {time_step}: time exceeded 240 sec.")
                 break
+            
+            step_elapsed_time = time.time() - step_start_time  # 计算单步运行时间
+            print(f"Time step {time_step} execution time: {step_elapsed_time:.3f} seconds")
 
         # 仅在使用 RL 控制时更新策略
         if use_deep_rl_control and len(memory.memory) > BATCH_SIZE:
