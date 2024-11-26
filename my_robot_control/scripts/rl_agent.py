@@ -573,10 +573,9 @@ class GazeboEnv:
 
         # 确保 action 是一维数组
         action = np.squeeze(action)
-        linear_speed = np.clip(action[0], -2.0, 3.0)
+        linear_speed = np.clip(action[0], -2.0, 2.0)
         steer_angle = np.clip(action[1], -0.6, 0.6)
         print("linear speed = ", linear_speed, " steer angle = ", steer_angle)
-
 
         # 更新状态
         self.state = self.generate_occupancy_grid(robot_x, robot_y, linear_speed, steer_angle)
@@ -600,7 +599,6 @@ class GazeboEnv:
             distance_to_wp = np.linalg.norm([robot_x - current_wp[0], robot_y - current_wp[1]])
             if distance_to_wp < 0.5:  # 假設通過 waypoint 的距離閾值為 0.5
                 reward += 2  # 通過 waypoint 獎勵
-                print(f"[Reward] Waypoint {self.current_waypoint_index} reached, reward: {reward}")
 
         # 更新机器人位置
         if self.previous_robot_position is not None:
@@ -617,8 +615,8 @@ class GazeboEnv:
 
         # 检查是否需要使用 RL 控制
         failure_range = range(
-            max(0, self.current_waypoint_index - 3),
-            min(len(self.waypoints), self.current_waypoint_index + 4)
+            max(0, self.current_waypoint_index - 5),
+            min(len(self.waypoints), self.current_waypoint_index + 3)
         )
         use_deep_rl_control = any(
             self.waypoint_failures.get(i, 0) > 1 for i in failure_range
@@ -647,7 +645,6 @@ class GazeboEnv:
         twist = Twist()
         twist.linear.x = linear_speed
         twist.angular.z = steer_angle
-        print('twist.linear.x = ', twist.linear.x,'twist.angular.z = ', twist.angular.z )
         self.pub_cmd_vel.publish(twist)
         self.last_twist = twist
 
@@ -730,10 +727,8 @@ class GazeboEnv:
         done = False
         # 將機器人的座標轉換為地圖上的坐標
         
-        print(state.shape)
         if isinstance(state, torch.Tensor):
             state = state.cpu().numpy()
-        print(state.ndim)
         if state.ndim == 4:
             # 对于 4 维情况，取第一个批次数据中的第一层
             occupancy_grid = state[0, 0]
@@ -993,7 +988,7 @@ class DWA:
         self.max_yaw_rate = 0.6
         self.max_accel = 1
         self.max_dyaw_rate = 0.3
-        self.dt = 0.2
+        self.dt = 0.1
         self.predict_time = 3.0
         self.goal = goal
         self.robot_radius = 1.0
@@ -1010,13 +1005,7 @@ class DWA:
             state[4] + self.max_dyaw_rate * self.dt
         ]
 
-        # 取交集
-        # dw = [
-        #     max(vs[0], vd[0]), min(vs[1], vd[1]),
-        #     max(vs[2], vd[2]), min(vs[3], vd[3])
-        # ]
         dw = vs
-        # print('Dynamic window limits: ',dw)
         return dw
 
     def motion(self, state, control):
@@ -1040,31 +1029,28 @@ class DWA:
         return np.array(trajectory)
 
     def calc_score(self, trajectory, obstacles):
-        # 計算目標距離分數
+        # 目标距离分数
         x, y = trajectory[-1, 0], trajectory[-1, 1]
         goal_dist = np.sqrt((self.goal[0] - x) ** 2 + (self.goal[1] - y) ** 2)
         goal_score = -goal_dist
 
-        # 計算安全分數
-        clearance = float('inf')
-        for ox, oy in obstacles:
-            dist = np.sqrt((ox - x) ** 2 + (oy - y) ** 2)
-            clearance = min(clearance, dist)
-        if clearance < self.robot_radius:
-            clearance_score = -float('inf')  # 發生碰撞
-        else:
-            clearance_score = clearance
+        # 安全分数：检测轨迹中是否发生碰撞
+        clearance_score = float('inf')
+        for tx, ty, _, _, _ in trajectory:
+            for ox, oy in obstacles:
+                dist = np.sqrt((ox - tx) ** 2 + (oy - ty) ** 2)
+                if dist < self.robot_radius:
+                    return goal_score, -float('inf'), 0.0  # 如果发生碰撞，直接返回最低分
+                clearance_score = min(clearance_score, dist)
 
-        # 計算速度分數
-        speed_score = trajectory[-1, 3]  # 最終速度
-        # print(f"Goal score: {goal_score}, Clearance score: {clearance_score}, Speed score: {speed_score}")
+        # 速度分数
+        speed_score = trajectory[-1, 3]  # 最终速度
         return goal_score, clearance_score, speed_score
 
     def plan(self, state, obstacles):
         print("dwa goal: ", self.goal)
         # 獲取動態窗口
         dw = self.calc_dynamic_window(state)  # 速度 角度限制
-        print("Calculated Dynamic Window:", dw)
         # 遍歷動態窗口中的所有控制
         best_trajectory = None
         best_score = -float('inf')
@@ -1076,11 +1062,9 @@ class DWA:
                 # 模擬軌跡
                 control = [v, omega]
                 trajectory = self.calc_trajectory(state, control)
-                print("Generated trajectory length:", len(trajectory))
-                print("Trajectory example (first and last points):", trajectory[0], trajectory[-1])
                 # 計算評分函數
                 goal_score, clearance_score, speed_score = self.calc_score(trajectory, obstacles)
-                total_score = goal_score * 0.7 + clearance_score * 0.2  + speed_score * 0.1
+                total_score = goal_score * 0.55 + clearance_score * 0.35  + speed_score * 0.1
 
                 # 找到最佳控制
                 if total_score > best_score:
@@ -1219,8 +1203,6 @@ def select_action_with_exploration(env, state, model, epsilon=1.0, dwa=None, obs
         current_omega = env.last_twist.angular.z
 
         state = [robot_x, robot_y, robot_yaw, current_speed, current_omega]
-        print('obstacles: ', obstacles)
-        print('state: ', state)
         action, _ = dwa.plan(state, obstacles)  
         action = torch.tensor(action, dtype=torch.float32).to(device)  # 確保格式正確
     else:
@@ -1271,10 +1253,15 @@ def main():
         start_time = time.time()
 
         for time_step in range(1500):  # there will be no greater than 1500 actions per episode
+            
+            # twist = Twist()
+            # twist.linear.x = env.last_twist.linear.x
+            # twist.angular.z = env.last_twist.angular.z
+            # env.pub_cmd_vel.publish(twist)
+
             step_start_time = time.time()
 
             robot_x, robot_y, robot_yaw = env.get_robot_position()
-            print("robot_x = ", robot_x, "robot_y = ", robot_y, "robot_yaw = ", robot_yaw)
 
             obstacles = [
                 (ox, oy) for ox, oy in static_obstacles
@@ -1287,20 +1274,20 @@ def main():
 
             # 根据是否使用 RL 控制，决定动作
             failure_range = range(
-                max(0, env.current_waypoint_index - 3),
-                min(len(env.waypoints), env.current_waypoint_index + 4)
+                max(0, env.current_waypoint_index - 5),
+                min(len(env.waypoints), env.current_waypoint_index + 3)
             )
             use_deep_rl_control = any(
                 env.waypoint_failures.get(i, 0) > 1 for i in failure_range
             )
 
-            # if use_deep_rl_control:
-            action = select_action_with_exploration(env, state, model, dwa=dwa, obstacles=obstacles)
-            action_np = action.detach().cpu().numpy().flatten()
-            print(f"RL Action at waypoint {env.current_waypoint_index}: {action_np}")
-            # else:
-            # action_np = env.calculate_action_pure_pursuit()
-            # print(f"A* Action at waypoint {env.current_waypoint_index}: {action_np}")
+            if use_deep_rl_control:
+                action = select_action_with_exploration(env, state, model, dwa=dwa, obstacles=obstacles)
+                action_np = action.detach().cpu().numpy().flatten()
+                print(f"RL Action at waypoint {env.current_waypoint_index}: {action_np}")
+            else:
+                action_np = env.calculate_action_pure_pursuit()
+                print(f"A* Action at waypoint {env.current_waypoint_index}: {action_np}")
 
             next_state, reward, done, _ = env.step(action_np)
 
