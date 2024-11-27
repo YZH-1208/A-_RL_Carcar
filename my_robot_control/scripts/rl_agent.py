@@ -168,8 +168,8 @@ class GazeboEnv:
         self.observation_space = (3, 64, 64)
         self.state = np.zeros(self.observation_space)
         self.done = False
-        self.target_x = -5.3334
-        self.target_y = -0.3768
+        self.target_x = -7.2213
+        self.target_y = -1.7003       
         self.waypoints = self.generate_waypoints()
         self.waypoint_distances = self.calculate_waypoint_distances()   # 計算一整圈機器任要奏的大致距離
         self.current_waypoint_index = 0
@@ -193,6 +193,7 @@ class GazeboEnv:
 
         self.optimize_waypoints_with_a_star()
         
+        self.sub_contacts = rospy.Subscriber('/gazebo/contacts', ContactsState, self.collision_callback)
     def load_slam_map(self, yaml_path):
         # 讀取 YAML 檔案
         with open(yaml_path, 'r') as file:
@@ -208,164 +209,176 @@ class GazeboEnv:
 
     def generate_waypoints(self):
         waypoints = [
-            (0.2206, 0.1208),
-            (1.2812, 0.0748),
-            (2.3472, 0.129),
-            (3.4053, 0.1631),
-            (4.4468, 0.1421),
-            (5.5032, 0.1996),
-            (6.5372, 0.2315),
-            (7.5948, 0.2499),
-            (8.6607, 0.3331),
-            (9.6811, 0.3973),
-            (10.6847, 0.4349),
-            (11.719, 0.4814),
-            (12.7995, 0.5223),
-            (13.8983, 0.515),
-            (14.9534, 0.6193),
-            (15.9899, 0.7217),
-            (17.0138, 0.7653),
-            (18.0751, 0.8058),
-            (19.0799, 0.864),
-            (20.1383, 0.936),
-            (21.1929, 0.9923),
-            (22.2351, 1.0279),
-            (23.3374, 1.1122),
-            (24.4096, 1.1694),
-            (25.4817, 1.2437),
-            (26.5643, 1.3221),
-            (27.6337, 1.4294),
-            (28.6643, 1.4471),
-            (29.6839, 1.4987),
-            (30.7, 1.58),
-            (31.7796, 1.6339),
-            (32.8068, 1.7283),
-            (33.8596, 1.8004),
-            (34.9469, 1.9665),
-            (35.9883, 1.9812),
-            (37.0816, 2.0237),
-            (38.1077, 2.1291),
-            (39.1405, 2.1418),
-            (40.1536, 2.2273),
-            (41.1599, 2.2473),
-            (42.2476, 2.2927),
-            (43.3042, 2.341),
-            (44.4049, 2.39),
-            (45.5091, 2.4284),
-            (46.579, 2.5288),
-            (47.651, 2.4926),
-            (48.6688, 2.6072),
-            (49.7786, 2.6338),
-            (50.7942, 2.6644),
-            (51.868, 2.7625),
-            (52.9149, 2.8676),
-            (54.0346, 2.9602),
-            (55.0855, 2.9847),
-            (56.1474, 3.1212),
-            (57.2397, 3.2988),
-            (58.2972, 3.5508),
-            (59.1103, 4.1404),
-            (59.6059, 5.1039),
-            (59.6032, 6.2015),
-            (59.4278, 7.212),
-            (59.3781, 8.2782),
-            (59.4323, 9.2866),
-            (59.3985, 10.304),
-            (59.3676, 11.3302),
-            (59.3193, 12.3833),
-            (59.359, 13.4472),
-            (59.3432, 14.4652),
-            (59.3123, 15.479),
-            (59.1214, 16.4917),
-            (58.7223, 17.4568),
-            (57.8609, 18.1061),
-            (56.8366, 18.3103),
-            (55.7809, 18.0938),
-            (54.7916, 17.707),
-            (53.7144, 17.5087),
-            (52.6274, 17.3683),
-            (51.6087, 17.1364),
-            (50.5924, 17.0295),
-            (49.5263, 16.9058),
-            (48.4514, 16.7769),
-            (47.3883, 16.6701),
-            (46.3186, 16.5403),
-            (45.3093, 16.4615),
-            (44.263, 16.299),
-            (43.2137, 16.1486),
-            (42.171, 16.0501),
-            (41.1264, 16.0245),
-            (40.171, 16.7172),
-            (39.1264, 16.8428),
-            (38.1122, 17.019),
-            (37.2234, 16.5322),
-            (36.6845, 15.6798),
-            (36.3607, 14.7064),
-            (35.5578, 13.9947),
-            (34.5764, 13.7466),
-            (33.5137, 13.6068),
-            (32.4975, 13.5031),
-            (31.5029, 13.3368),
-            (30.4162, 13.1925),
-            (29.3894, 13.067),
-            (28.3181, 12.9541),
-            (27.3195, 12.8721),
-            (26.2852, 12.8035),
-            (25.241, 12.6952),
-            (24.1598, 12.6435),
-            (23.0712, 12.5947),
-            (21.9718, 12.5297),
-            (20.9141, 12.4492),
-            (19.8964, 12.3878),
-            (18.7163, 12.32),
-            (17.6221, 12.2928),
-            (16.5457, 12.2855),
-            (15.5503, 12.1534),
-            (14.4794, 12.0462),
-            (13.4643, 11.9637),
-            (12.3466, 11.7943),
-            (11.2276, 11.6071),
-            (10.2529, 12.0711),
-            (9.7942, 13.0066),
-            (9.398, 13.9699),
-            (8.6017, 14.7268),
-            (7.4856, 14.8902),
-            (6.5116, 14.4724),
-            (5.4626, 14.1256),
-            (4.3911, 13.9535),
-            (3.3139, 13.8013),
-            (2.2967, 13.7577),
-            (1.2165, 13.7116),
-            (0.1864, 13.6054),
-            (-0.9592, 13.4747),
-            (-2.0086, 13.352),
-            (-3.0267, 13.3358),
-            (-4.0117, 13.5304),
-            (-5.0541, 13.8047),
-            (-6.0953, 13.9034),
-            (-7.1116, 13.8871),
-            (-8.152, 13.8062),
-            (-9.195, 13.7043),
-            (-10.2548, 13.6152),
-            (-11.234, 13.3289),
-            (-11.9937, 12.6211),
-            (-12.3488, 11.6585),
-            (-12.4231, 10.6268),
-            (-12.3353, 9.5915),
-            (-12.2405, 8.5597),
-            (-12.1454, 7.4974),
-            (-12.0596, 6.4487),
-            (-12.0537, 5.3613),
-            (-12.0269, 4.2741),
-            (-11.999, 3.2125),
-            (-11.9454, 2.2009),
-            (-11.7614, 1.1884),
-            (-11.2675, 0.2385),
-            (-10.5404, -0.58),
-            (-9.4494, -0.8399),
-            (-8.3965, -0.8367),
-            (-7.3912, -0.6242),
-            (-6.3592, -0.463),
+            (-6.4981, -1.0627),
+            (-5.4541, -1.0117),
+            (-4.4041, -0.862),
+            (-3.3692, -1.0294),
+            (-2.295, -1.114),
+            (-1.2472, -1.0318),
+            (-0.1614, -0.6948),
+            (0.8931, -0.8804),
+            (1.9412, -0.8604),
+            (2.9804, -0.7229),
+            (3.874, -0.2681),
+            (4.9283, -0.1644),
+            (5.9876, -0.345),
+            (7.019, -0.5218),
+            (7.9967, -0.2338),
+            (9.0833, -0.1096),
+            (10.1187, -0.3335),
+            (11.1745, -0.6322),
+            (12.1693, -0.8619),
+            (13.1291, -0.4148),
+            (14.1217, -0.0282),
+            (15.1261, 0.123),
+            (16.1313, 0.4439),
+            (17.1389, 0.696),
+            (18.1388, 0.6685),
+            (19.2632, 0.5127),
+            (20.2774, 0.2655),
+            (21.2968, 0.0303),
+            (22.3133, -0.0192),
+            (23.2468, 0.446),
+            (24.1412, 0.9065),
+            (25.1178, 0.5027),
+            (26.1279, 0.4794),
+            (27.0867, 0.8266),
+            (28.0713, 1.4229),
+            (29.1537, 1.3866),
+            (30.2492, 1.1549),
+            (31.385, 1.0995),
+            (32.4137, 1.243),
+            (33.4134, 1.5432),
+            (34.4137, 1.5904),
+            (35.4936, 1.5904),
+            (36.5067, 1.5607),
+            (37.5432, 1.5505),
+            (38.584, 1.7008),
+            (39.6134, 1.9053),
+            (40.5979, 2.0912),
+            (41.6557, 2.3779),
+            (42.5711, 2.8643),
+            (43.5911, 2.9725),
+            (44.5929, 3.0637),
+            (45.5919, 2.9841),
+            (46.6219, 2.9569),
+            (47.6314, 3.0027),
+            (48.7359, 2.832),
+            (49.5462, 2.1761),
+            (50.5982, 2.1709),
+            (51.616, 2.3573),
+            (52.6663, 2.5593),
+            (53.7532, 2.5325),
+            (54.7851, 2.5474),
+            (55.8182, 2.5174),
+            (56.8358, 2.6713),
+            (57.8557, 2.8815),
+            (58.8912, 3.0949),
+            (59.7436, 3.6285),
+            (60.5865, 4.2367),
+            (60.6504, 5.2876),
+            (60.7991, 6.3874),
+            (60.322, 7.3094),
+            (59.8004, 8.1976),
+            (59.4093, 9.195),
+            (59.1417, 10.1994),
+            (59.1449, 11.2274),
+            (59.5323, 12.2182),
+            (59.8637, 13.2405),
+            (60.5688, 14.0568),
+            (60.6266, 15.1571),
+            (60.007, 15.9558),
+            (59.0539, 16.5128),
+            (57.9671, 16.526),
+            (56.9161, 16.7399),
+            (55.9553, 17.0346),
+            (54.9404, 17.0596),
+            (53.9559, 16.8278),
+            (52.9408, 16.8697),
+            (51.9147, 16.7642),
+            (50.9449, 16.4902),
+            (49.9175, 16.3029),
+            (48.8903, 16.1165),
+            (47.7762, 16.0994),
+            (46.7442, 16.0733),
+            (45.7566, 15.8195),
+            (44.756, 15.7218),
+            (43.7254, 15.9309),
+            (42.6292, 15.8439),
+            (41.6163, 15.8177),
+            (40.5832, 15.7881),
+            (39.5617, 15.773),
+            (38.5099, 15.5648),
+            (37.692, 14.9481),
+            (36.8538, 14.3078),
+            (35.8906, 13.8384),
+            (34.8551, 13.6316),
+            (33.8205, 13.5495),
+            (32.7391, 13.4423),
+            (31.7035, 13.1056),
+            (30.6971, 12.7802),
+            (29.6914, 12.5216),
+            (28.7072, 12.3238),
+            (27.6442, 12.0953),
+            (26.5991, 11.9873),
+            (25.5713, 11.9867),
+            (24.488, 12.0679),
+            (23.4441, 12.0246),
+            (22.3169, 11.7745),
+            (21.3221, 11.538),
+            (20.3265, 11.4243),
+            (19.2855, 11.5028),
+            (18.2164, 11.5491),
+            (17.1238, 11.6235),
+            (16.0574, 11.4029),
+            (14.982, 11.2479),
+            (13.9491, 11.0487),
+            (12.9017, 11.1455),
+            (11.8915, 11.4186),
+            (10.8461, 11.6079),
+            (9.9029, 12.0097),
+            (9.0549, 12.5765),
+            (8.4289, 13.4238),
+            (7.4035, 13.6627),
+            (6.3785, 13.5659),
+            (5.3735, 13.4815),
+            (4.3971, 13.1044),
+            (3.3853, 13.2918),
+            (2.3331, 13.0208),
+            (1.2304, 12.9829),
+            (0.2242, 13.094),
+            (-0.807, 12.9358),
+            (-1.8081, 12.8495),
+            (-2.7738, 13.3168),
+            (-3.4822, 14.0699),
+            (-4.5285, 14.2483),
+            (-5.5965, 13.9753),
+            (-6.5324, 13.6016),
+            (-7.3092, 12.8632),
+            (-8.3255, 12.9916),
+            (-9.1914, 13.7593),
+            (-10.2374, 14.069),
+            (-11.2162, 13.7566),
+            (-11.653, 12.8061),
+            (-11.6989, 11.7238),
+            (-11.8899, 10.7353),
+            (-12.6174, 10.0373),
+            (-12.7701, 8.9551),
+            (-12.4859, 7.9523),
+            (-12.153, 6.8903),
+            (-12.4712, 5.819),
+            (-13.0498, 4.8729),
+            (-13.1676, 3.8605),
+            (-12.4328, 3.1822),
+            (-12.1159, 2.1018),
+            (-12.8436, 1.2659),
+            (-13.3701, 0.2175),
+            (-13.0514, -0.8866),
+            (-12.3046, -1.619),
+            (-11.2799, -1.472),
+            (-10.1229, -1.3051),
+            (-9.1283, -1.4767),
+            (-8.1332, -1.2563),
             (self.target_x, self.target_y)
         ]
         return waypoints
@@ -450,6 +463,7 @@ class GazeboEnv:
         
         self.optimized_waypoints = optimized_waypoints
         self.waypoints = optimized_waypoints
+        print(self.waypoints)
         self.optimized_waypoints_calculated = True  # 設定標記，表示已計算過
 
 
@@ -567,7 +581,7 @@ class GazeboEnv:
         return occupancy_grid
 
 
-    def step(self, action):
+    def step(self, action, obstacles):
         reward = 0
         robot_x, robot_y, robot_yaw = self.get_robot_position()
 
@@ -615,12 +629,22 @@ class GazeboEnv:
 
         # 检查是否需要使用 RL 控制
         failure_range = range(
-            max(0, self.current_waypoint_index - 5),
-            min(len(self.waypoints), self.current_waypoint_index + 3)
+            max(0, self.current_waypoint_index - 4),
+            min(len(self.waypoints), self.current_waypoint_index + 2)
         )
         use_deep_rl_control = any(
             self.waypoint_failures.get(i, 0) > 1 for i in failure_range
         )
+
+        collision = detect_collision(robot_x, robot_y, robot_yaw, obstacles)
+        if not use_deep_rl_control:
+            if collision:
+                self.waypoint_failures[self.current_waypoint_index] += 1
+                print('touch the obstacles')
+                reward -= 10.0
+                self.reset()
+                return self.state, reward, True, {}
+        
         # 处理无进展的情况
         if distance_moved < 0.05:
             self.no_progress_steps += 1
@@ -640,7 +664,12 @@ class GazeboEnv:
                     return self.state, reward, True, {}
         else:
             self.no_progress_steps = 0
-
+        
+        if self.collision_detected:
+            rospy.loginfo('collision detectd! resetting')
+            reward -= 10.0
+            self.reset()
+            return self.state, reward, True, {}
         # 发布控制命令
         twist = Twist()
         twist.linear.x = linear_speed
@@ -671,8 +700,8 @@ class GazeboEnv:
         quaternion = quaternion_from_euler(0.0, 0.0, yaw)
         state_msg = ModelState()
         state_msg.model_name = 'my_robot'
-        state_msg.pose.position.x = 0.2206
-        state_msg.pose.position.y = 0.1208
+        state_msg.pose.position.x = -6.4981
+        state_msg.pose.position.y = -1.0627
         state_msg.pose.position.z = 2.2
         state_msg.pose.orientation.x = quaternion[0]
         state_msg.pose.orientation.y = quaternion[1]
@@ -991,7 +1020,7 @@ class DWA:
         self.dt = 0.1
         self.predict_time = 3.0
         self.goal = goal
-        self.robot_radius = 1.0
+        self.robot_radius = 0.5
 
     def calc_dynamic_window(self, state):
         # 當前速度限制
@@ -1167,6 +1196,55 @@ def ppo_update(ppo_epochs, env, model, optimizer, memory, scaler, batch_size):
         memory.clear()
         print(f"[PPO Update] Epoch {epoch} completed successfully.")
 
+def calculate_bounding_box(robot_x, robot_y, robot_yaw):
+
+    # 机器人中心到边界的相对距离
+    half_length = 0.25
+    half_width = 0.25
+
+    # 矩形的局部坐标系下的 4 个角点
+    corners = np.array([
+        [half_length, half_width],
+        [half_length, -half_width],
+        [-half_length, -half_width],
+        [-half_length, half_width]
+    ])
+
+    # 旋转矩阵
+    rotation_matrix = np.array([
+        [np.cos(robot_yaw), -np.sin(robot_yaw)],
+        [np.sin(robot_yaw), np.cos(robot_yaw)]
+    ])
+
+    # 全局坐标系下的角点
+    global_corners = np.dot(corners, rotation_matrix.T) + np.array([robot_x, robot_y])
+    return global_corners
+
+def is_point_in_polygon(point, polygon):
+    x, y = point
+    n = len(polygon)
+    inside = False
+
+    for i in range(n):
+        x1, y1 = polygon[i]
+        x2, y2 = polygon[(i + 1) % n]
+
+        if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1) + x1):
+            inside = not inside
+    return inside
+
+def detect_collision(robot_x, robot_y, robot_yaw, obstacles):
+    # 计算边界框
+    bounding_box = calculate_bounding_box(robot_x, robot_y, robot_yaw,)
+
+    # 遍历障碍物
+    for obstacle in obstacles:
+        # 检查是否在边界内
+        if is_point_in_polygon(obstacle, bounding_box):
+            return True
+    return False
+
+
 def _adjust_dimensions(state_batch, next_state_batch):
     print(f"[DEBUG] Before adjustment - State shape: {state_batch.shape}, Next state shape: {next_state_batch.shape}")
     
@@ -1192,7 +1270,7 @@ def _check_for_invalid_values(tensor, name):
     if torch.isnan(tensor).any() or torch.isinf(tensor).any():
         raise ValueError(f"[PPO Update] {name} contains invalid values (NaN or Inf).")
 
-def select_action_with_exploration(env, state, model, epsilon=1.0, dwa=None, obstacles=None):
+def select_action_with_exploration(env, state, model, epsilon=0.6, dwa=None, obstacles=None):
     if random.random() < epsilon:
         if dwa is None or obstacles is None:
             raise ValueError("DWA controller or obstacles is not provided")
@@ -1231,6 +1309,8 @@ def main():
 
     num_episodes = 1000000
     best_test_reward = -np.inf
+    movement_log = []  # 存储记录的列表
+    last_recorded_position = None  # 记录上一次记录的位置
 
     # init the obstacle information
     static_obstacles = []
@@ -1244,7 +1324,7 @@ def main():
         if not env.optimized_waypoints_calculated:
             env.optimize_waypoints_with_a_star()
 
-        state = env.reset()   # 更新車子到初始點
+        state = env.reset()   # 更新车子到初始点
         if not isinstance(state, torch.Tensor):
             state = torch.tensor(state, dtype=torch.float32)
         state = state.clone().detach().unsqueeze(0).to(device)
@@ -1252,20 +1332,21 @@ def main():
         total_reward = 0
         start_time = time.time()
 
-        for time_step in range(1500):  # there will be no greater than 1500 actions per episode
-            
-            # twist = Twist()
-            # twist.linear.x = env.last_twist.linear.x
-            # twist.angular.z = env.last_twist.angular.z
-            # env.pub_cmd_vel.publish(twist)
-
-            step_start_time = time.time()
+        for time_step in range(1500):  # there will be no greater than 1500 actions per episode=
 
             robot_x, robot_y, robot_yaw = env.get_robot_position()
 
+            # 检查是否需要记录当前位置
+            if last_recorded_position is None or np.linalg.norm(
+                [robot_x - last_recorded_position[0], robot_y - last_recorded_position[1]]
+            ) > 1.05:
+                movement_log.append((robot_x, robot_y, robot_yaw))
+                last_recorded_position = (robot_x, robot_y)  # 更新上次记录的位置
+                # print(f"Recorded position: {robot_x, robot_y, robot_yaw}")
+
             obstacles = [
                 (ox, oy) for ox, oy in static_obstacles
-                if np.sqrt((ox-robot_x)**2 + (oy - robot_y)**2) < 8.0  # 限制只取機器當前位置8米範圍的障礙物 
+                if np.sqrt((ox-robot_x)**2 + (oy - robot_y)**2) < 8.0  # 限制只取机器当前位置8米范围的障碍物 
             ]
             obstacles = grid_filter(obstacles, grid_size=0.7)
 
@@ -1274,8 +1355,8 @@ def main():
 
             # 根据是否使用 RL 控制，决定动作
             failure_range = range(
-                max(0, env.current_waypoint_index - 5),
-                min(len(env.waypoints), env.current_waypoint_index + 3)
+                max(0, env.current_waypoint_index - 4),
+                min(len(env.waypoints), env.current_waypoint_index + 2)
             )
             use_deep_rl_control = any(
                 env.waypoint_failures.get(i, 0) > 1 for i in failure_range
@@ -1289,7 +1370,7 @@ def main():
                 action_np = env.calculate_action_pure_pursuit()
                 print(f"A* Action at waypoint {env.current_waypoint_index}: {action_np}")
 
-            next_state, reward, done, _ = env.step(action_np)
+            next_state, reward, done, _ = env.step(action_np, obstacles=obstacles)
 
             if not isinstance(next_state, torch.Tensor):
                 next_state = torch.tensor(next_state, dtype=torch.float32)
@@ -1310,14 +1391,11 @@ def main():
                     reward -= 10.0
                     print(f"Episode {e} failed at time step {time_step}: time exceeded 240 sec.")
                 break
-            
-            step_elapsed_time = time.time() - step_start_time  # 计算单步运行时间
-            print(f"Time step {time_step} execution time: {step_elapsed_time:.3f} seconds")
 
         # 仅在使用 RL 控制时更新策略
         if use_deep_rl_control and len(memory.memory) > BATCH_SIZE:
             curren_batch_size = min(BATCH_SIZE, len(memory.memory))
-            ppo_update(PPO_EPOCHS, env, model, optimizer, memory, scaler,batch_size = curren_batch_size)
+            ppo_update(PPO_EPOCHS, env, model, optimizer, memory, scaler, batch_size=curren_batch_size)
 
         print(f"Episode {e}, Total Reward: {total_reward}")
 
@@ -1334,6 +1412,12 @@ def main():
 
     torch.save(model.state_dict(), model_path)
     print("Final model saved.")
+
+    # 打印记录的移动日志
+    print("Movement Log:")
+    for log in movement_log:
+        print(log)
+
 
 
 

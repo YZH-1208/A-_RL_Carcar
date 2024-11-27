@@ -144,6 +144,7 @@
       <!-- Front Left Wheel Contact Sensor -->
       <sensor name="contact_sensor_fl" type="contact">
         <update_rate>50</update_rate>
+        <always_on>true</always_on>
         <contact>
           <collision>wheel_front_left::collision</collision>
         </contact>
@@ -228,6 +229,7 @@
       <!-- Front Right Wheel Contact Sensor -->
       <sensor name="contact_sensor_fr" type="contact">
         <update_rate>50</update_rate>
+        <always_on>true</always_on>
         <contact>
           <collision>wheel_front_right::collision</collision>
         </contact>
