@@ -1241,16 +1241,19 @@ def save_movement_log_to_csv(movement_log, filename= f"/home/daniel/catkin_ws/sr
 
 def main():
     wandb.init(
-        project="gazebo-rl",
-        config={
-            "learning_rate": LEARNING_RATE,
-            "batch_size": BATCH_SIZE,
-            "gamma": GAMMA,
-            "clip_param": CLIP_PARAM,
-            "ppo_epochs": PPO_EPOCHS,
-            "memory_size": MEMORY_SIZE
-        }
+    project="gazebo-rl",  # 你的项目名称
+    id="RL_control_test",  # 填入你要接续的 Run ID
+    resume="allow",  # 允许接续，如果找不到则创建新 Run
+    config={
+        "learning_rate": LEARNING_RATE,
+        "batch_size": BATCH_SIZE,
+        "gamma": GAMMA,
+        "clip_param": CLIP_PARAM,
+        "ppo_epochs": PPO_EPOCHS,
+        "memory_size": MEMORY_SIZE,
+    },
     )
+
     env = GazeboEnv(None)
     dwa = DWA(goal=env.waypoints[env.current_waypoint_index + 3])
     model = ActorCritic(env.observation_space, env.action_space).to(device)
@@ -1265,10 +1268,17 @@ def main():
     best_model_path = "/home/daniel/catkin_ws/src/my_robot_control/scripts/best_model.pth"
     
     if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
-        print("Loaded existing model.")
+        checkpoint = torch.load(model_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        memory.memory = checkpoint['memory']
+        start_epoch = checkpoint['epoch'] + 1
+        print(f"Resumed training from epoch {start_epoch}")
     else:
-        print("Created new model.")
+        memory.memory = [None] * MEMORY_SIZE
+        start_epoch = 0
+        print("Starting training from scratch")
 
     num_episodes = 1000000
     best_test_reward = -np.inf
@@ -1380,12 +1390,24 @@ def main():
 
         if total_reward > best_test_reward:
             best_test_reward = total_reward
-            torch.save(model.state_dict(), best_model_path)
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'memory': memory.memory,
+                'epoch': e,
+            }, best_model_path)
             print(f"New best model saved with reward: {best_test_reward}")
             # save_movement_log_to_csv(movement_log)
 
         if e % 5 == 0:
-            torch.save(model.state_dict(), model_path)
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'memory': memory.memory,
+                'epoch': e,
+            }, model_path)
             print(f"Model saved after {e} episodes.")
         rospy.sleep(1.0)
 
