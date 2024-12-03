@@ -25,6 +25,8 @@ from sklearn.cluster import KMeans
 import csv
 import datetime
 from torch.optim.lr_scheduler import StepLR
+import wandb
+import torch
 
 # 超參數
 REFERENCE_DISTANCE_TOLERANCE = 0.65
@@ -63,18 +65,19 @@ class PrioritizedMemory:
         self.max_priority = 1.0
 
     def add(self, state, action, reward, done, next_state):
+        print(f"Memory size: {len([x for x in self.memory if x is not None])}")
         if isinstance(state, np.ndarray):
             state = torch.tensor(state, dtype=torch.float32)
         if isinstance(next_state, np.ndarray):
             next_state = torch.tensor(next_state, dtype=torch.float32)
-
-        # Ensure states have the right shape (B, C, H, W)
+        
+        # 调整维度
         if state.dim() == 5:
             state = state.squeeze(1)
         if next_state.dim() == 5:
             next_state = next_state.squeeze(1)
-
-        # Ensure states have 4 dimensions
+        
+        # 确保状态有 4 个维度
         if state.dim() == 3:
             state = state.unsqueeze(0)
         if next_state.dim() == 3:
@@ -87,45 +90,54 @@ class PrioritizedMemory:
             torch.tensor(done, dtype=torch.float32, device=device),
             next_state.to(device)
         )
+        self.position = (self.position + 1) % self.capacity
+        self.priorities[self.position] = self.max_priority
+
 
     def sample(self, batch_size):
         valid_samples = [i for i, x in enumerate(self.memory) if x is not None]
         if len(valid_samples) < batch_size:
             raise ValueError(f"Not enough valid samples. Have {len(valid_samples)}, need {batch_size}")
 
-        # Update beta
+        # 更新 beta
         self.beta = min(1.0, self.beta + self.beta_increment)
         
-        # Calculate sampling probabilities
+        # 计算采样概率
         priorities = self.priorities[:len(valid_samples)]
         probs = priorities ** self.alpha
         probs = probs / probs.sum()
 
-        # Sample indices
+        # 采样索引
         indices = torch.multinomial(probs, batch_size, replacement=False)
         
-        # Calculate importance sampling weights
+        # 计算重要性采样权重
         weights = (len(valid_samples) * probs[indices]) ** (-self.beta)
         weights = weights / weights.max()
 
-        # Get samples
+        # 获取样本
         batch = [self.memory[idx] for idx in indices]
         states, actions, rewards, dones, next_states = zip(*batch)
 
-        # Stack and transfer to device
+        # 确保状态维度正确
         states = torch.stack(states).to(device)
         next_states = torch.stack(next_states).to(device)
         actions = torch.stack(actions).to(device)
         rewards = torch.stack(rewards).to(device)
         dones = torch.stack(dones).to(device)
 
+        print(f"Sampled {batch_size} samples from memory.")
         return states, actions, rewards, dones, next_states, indices, weights.to(device)
 
 
+
     def update_priorities(self, indices, priorities):
-        priorities = priorities.abs().clamp(min=self.epsilon, max=100.0)
+        priorities = torch.tensor(priorities, dtype=self.priorities.dtype, device=self.priorities.device)
+        assert len(indices) == len(priorities), \
+            f"Shape mismatch: indices {indices.shape}, priorities {priorities.shape}"
         self.priorities[indices] = priorities
-        self.max_priority = max(self.max_priority, priorities.max().item())
+
+
+
 
     def clear(self):
         self.position = 0
@@ -145,14 +157,13 @@ class GazeboEnv:
         self.observation_space = (3, 64, 64)
         self.state = np.zeros(self.observation_space)
         self.done = False
-        self.target_x = -7.2213
-        self.target_y = -1.7003  
+        self.target_x = 59.7436
+        self.target_y = 3.6285  
         self.waypoints = self.generate_waypoints()
         self.waypoint_distances = self.calculate_waypoint_distances()   # 計算一整圈機器任要奏的大致距離
         self.current_waypoint_index = 0
         self.last_twist = Twist()
         self.epsilon = 0.05
-        self.collision_detected = False
         self.previous_robot_position = None  # 初始化 previous_robot_position 為 None
         self.previous_distance_to_goal = None  # 初始化 previous_distance_to_goal 為 None
 
@@ -165,12 +176,14 @@ class GazeboEnv:
 
         self.waypoint_failures = {i: 0 for i in range(len(self.waypoints))}
 
+        self.total_distance_to_goal = np.linalg.norm([self.target_x + 6.4981, self.target_y +1.0627])  # 起點到目標的總距離
+        self.last_progress_ratio = 0  # 上一次的進度比例
+
         # 加载SLAM地圖
         self.load_slam_map('/home/daniel/maps/my_map0924.yaml')
 
         self.optimize_waypoints_with_a_star()
         
-        self.sub_contacts = rospy.Subscriber('/gazebo/contacts', ContactsState, self.collision_callback)
     def load_slam_map(self, yaml_path):
         # 讀取 YAML 檔案
         with open(yaml_path, 'r') as file:
@@ -458,13 +471,6 @@ class GazeboEnv:
 
         return curve
 
-    def collision_callback(self, data):
-        if len(data.states) > 0:
-            self.collision_detected = True
-            rospy.loginfo("Collision detected!")
-        else:
-            self.collision_detected = False
-
     def generate_imu_data(self):
         imu_data = Imu()
         imu_data.header.stamp = rospy.Time.now()
@@ -538,13 +544,13 @@ class GazeboEnv:
         occupancy_grid = np.zeros((3, 64, 64), dtype=np.float32)
         
         # 第一层：归一化图片数据到 [0, 1]
-        occupancy_grid[0, :, :] = grid/255.0
+        occupancy_grid[0, :, :] = grid
 
         # 第二层：归一化速度到 [0, 1]
-        occupancy_grid[1, :, :] = (linear_speed + 2.0)/4
+        occupancy_grid[1, :, :] = robot_x
 
         # 第三层：归一化角度到 [0, 1]
-        occupancy_grid[2, :, :] = (steer_angle + 0.5)/1.0
+        occupancy_grid[2, :, :] = robot_y
 
         if np.isnan(occupancy_grid).any() or np.isinf(occupancy_grid).any():
             raise ValueError("NaN or Inf detected in occupancy_grid!")
@@ -572,12 +578,18 @@ class GazeboEnv:
 
         distance_to_goal = np.linalg.norm([robot_x - self.target_x, robot_y - self.target_y])
 
+        # 奖励逻辑：每靠近目标 1/12 的总距离，增加奖励
+        progress_ratio = 1 - distance_to_goal / self.total_distance_to_goal  # 计算当前进度比例
+        if progress_ratio - self.last_progress_ratio >= 1 / 12.0:  # 每超过 1/12 的距离进度
+            reward += 3.0
+            self.last_progress_ratio = progress_ratio  # 更新进度
+
         if distance_to_goal < 0.5:  # 设定阈值为0.5米，可根据需要调整
             print('Robot has reached the goal!')
             reward += 20.0 # 给一个大的正向奖励
             self.reset()
             return self.state, reward, True, {}  # 重置环境
-
+        
         if self.current_waypoint_index < len(self.waypoints):
             current_wp = self.waypoints[self.current_waypoint_index]
             distance_to_wp = np.linalg.norm([robot_x - current_wp[0], robot_y - current_wp[1]])
@@ -606,8 +618,10 @@ class GazeboEnv:
             self.waypoint_failures.get(i, 0) > 1 for i in failure_range
         )
 
+        use_deep_rl_control = True  # test  RL mdoel
+
         collision = detect_collision(robot_x, robot_y, robot_yaw, obstacles)
-        if not use_deep_rl_control:
+        if use_deep_rl_control:
             if collision:
                 self.waypoint_failures[self.current_waypoint_index] += 1
                 print('touch the obstacles')
@@ -615,32 +629,29 @@ class GazeboEnv:
                 self.reset()
                 return self.state, reward, True, {}
         
-        # 处理无进展的情况
-        if distance_moved < 0.05:
-            self.no_progress_steps += 1
-            reward -= 0.3
-            if self.no_progress_steps >= self.max_no_progress_steps:
-                if use_deep_rl_control:
-                    print('failure at point', self.current_waypoint_index)
-                    rospy.loginfo("No progress detected, resetting environment.")
-                    reward -= 10.0
-                    self.reset()
-                    return self.state, reward, True, {}
-                else:
-                    self.waypoint_failures[self.current_waypoint_index] += 1
-                    print('failure at point', self.current_waypoint_index)
-                    rospy.loginfo("No progress detected, resetting environment.")
-                    reward -= 10.0
-                    self.reset()
-                    return self.state, reward, True, {}
-        else:
-            self.no_progress_steps = 0
         
-        if self.collision_detected:
-            rospy.loginfo('collision detectd! resetting')
-            reward -= 10.0
-            self.reset()
-            return self.state, reward, True, {}
+
+        # # 处理无进展的情况
+        # if distance_moved < 0.05:
+        #     self.no_progress_steps += 1
+        #     # reward -= 0.3
+        #     if self.no_progress_steps >= 20:
+        #         if use_deep_rl_control:
+        #             print('failure at point', self.current_waypoint_index)
+        #             rospy.loginfo("No progress detected, resetting environment.")
+        #             reward -= 5.0
+        #             self.reset()
+        #             return self.state, reward, True, {}
+        #         else:
+        #             self.waypoint_failures[self.current_waypoint_index] += 1
+        #             print('failure at point', self.current_waypoint_index)
+        #             rospy.loginfo("No progress detected, resetting environment.")
+        #             reward -= 10.0
+        #             self.reset()
+        #             return self.state, reward, True, {}
+        # else:
+        #     self.no_progress_steps = 0
+
         # 发布控制命令
         twist = Twist()
         twist.linear.x = linear_speed
@@ -713,7 +724,6 @@ class GazeboEnv:
         self.previous_yaw_error = 0
         self.no_progress_steps = 0
         self.previous_distance_to_goal = None
-        self.collision_detected = False
 
         # Ensure the state is 4D tensor
         if isinstance(self.state, np.ndarray):
@@ -738,7 +748,7 @@ class GazeboEnv:
 
         img_x, img_y = self.gazebo_to_image_coords(robot_x, robot_y)
         obstacle_count = np.sum(occupancy_grid <= 190/255.0)  # 假設state[0]為佔據網格通道
-        reward += 5 - obstacle_count*3/100.0
+        reward += 1 - obstacle_count*3/100.0
 
         return reward, done
 
@@ -932,7 +942,7 @@ class ActorCritic(nn.Module):
         
         # Define action bounds
         action_space = torch.tensor([
-            [0.5, -0.5],  # min values
+            [-2.0, -0.5],  # min values
             [2.0, 0.5]    # max values
         ], device=device)
         
@@ -950,19 +960,17 @@ class ActorCritic(nn.Module):
         return action.detach()
 
     def evaluate(self, state, action):
-        action_mean, action_std, value = self(state)
-        
-        # Ensure proper bounds for action_std
-        action_std = torch.clamp(action_std, min=1e-6, max=1.0)
-        
-        # Create normal distribution
-        dist = torch.distributions.Normal(action_mean, action_std)
-        
-        # Calculate log probabilities
-        action_log_probs = dist.log_prob(action).sum(dim=-1, keepdim=True)
-        dist_entropy = dist.entropy().sum(dim=-1, keepdim=True)
-        
-        return action_log_probs, value, dist_entropy
+        try:
+            action_mean, action_std, value = self(state)
+            action_std = torch.clamp(action_std, min=1e-6, max=1.0)  # 避免无效值
+            dist = torch.distributions.Normal(action_mean, action_std)
+            action_log_probs = dist.log_prob(action).sum(dim=-1, keepdim=True)
+            dist_entropy = dist.entropy().sum(dim=-1, keepdim=True)
+            return action_log_probs, value, dist_entropy
+        except Exception as e:
+            print(f"Error in evaluate: {e}")
+            raise
+
 
 class DWA:
     def __init__(self, goal):
@@ -1046,7 +1054,9 @@ class DWA:
 
 def ppo_update(ppo_epochs, env, model, optimizer, memory, scaler, batch_size, scheduler):
     valid_samples = len([x for x in memory.memory if x is not None])
+    print(f"Valid samples in memory: {valid_samples}")
     if valid_samples < batch_size:
+        print("No sufficient samples to update")
         return
 
     accumulation_steps = 4
@@ -1054,7 +1064,7 @@ def ppo_update(ppo_epochs, env, model, optimizer, memory, scaler, batch_size, sc
     optimizer.zero_grad()
 
     for epoch in range(ppo_epochs):
-        # Warmup learning rate
+        # Adjust learning rate
         progress = min(1.0, epoch / warmup_epochs)
         adjusted_lr = LEARNING_RATE * progress * (1 / (1 + epoch * 0.001))
         for param_group in optimizer.param_groups:
@@ -1063,65 +1073,74 @@ def ppo_update(ppo_epochs, env, model, optimizer, memory, scaler, batch_size, sc
         # Sample batch
         state_batch, action_batch, reward_batch, done_batch, next_state_batch, indices, weights = memory.sample(batch_size)
         state_batch, next_state_batch = _adjust_dimensions(state_batch, next_state_batch)
-        
+        print(f"Sampled batch: State batch shape {state_batch.shape}, Reward batch {reward_batch.shape}")
+
         # Normalize rewards
         reward_batch = (reward_batch - reward_batch.mean()) / (reward_batch.std() + 1e-8)
         reward_batch = torch.clamp(reward_batch, -10.0, 10.0)
 
-        # Calculate advantages
+        # Compute advantages
         with torch.no_grad():
             old_log_probs, _, _ = model.evaluate(state_batch, action_batch)
             _, _, next_values = model(next_state_batch)
             _, _, values = model(state_batch)
 
-        # Compute target values and advantages
-        target_values = reward_batch + (1 - done_batch) * GAMMA * next_values
+        values = values.squeeze()
+        target_values = reward_batch + (1 - done_batch) * GAMMA * next_values.squeeze()
         advantages = (target_values - values).detach()
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         advantages = torch.clamp(advantages, -10.0, 10.0)
 
+        print(f"Target values shape: {target_values.shape}, Advantages shape: {advantages.shape}")
+
         # PPO update steps
-        for _ in range(PPO_EPOCHS):
-            with torch.amp.autocast(enabled=True, dtype=torch.float16, device_type="cuda"):
-                log_probs, values, dist_entropy = model.evaluate(state_batch, action_batch)
-                action_mean, action_std, _ = model(state_batch)
-                
-                ratio = (log_probs - old_log_probs).exp()
-                ratio = torch.clamp(ratio, 0.0, 10.0)
-                
-                surr1 = ratio * advantages
-                surr2 = torch.clamp(ratio, 1 - CLIP_PARAM, 1 + CLIP_PARAM) * advantages
+        for step in range(ppo_epochs):
+            log_probs, values, dist_entropy = model.evaluate(state_batch, action_batch)
+            log_probs = log_probs.view(-1)
+            weights = weights.view(-1)
+            ratio = (log_probs - old_log_probs).exp()
+            ratio = torch.clamp(ratio, 0.0, 10.0)
 
-                # Calculate losses
-                actor_loss = -(weights * torch.min(surr1, surr2)).mean()
-                critic_loss = 0.5 * (weights * (values - target_values).pow(2)).mean()
-                entropy_loss = -0.01 * (weights * dist_entropy).mean()
-                
-                loss = (actor_loss + critic_loss + entropy_loss) / accumulation_steps
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1 - CLIP_PARAM, 1 + CLIP_PARAM) * advantages
 
-                # Backward pass with gradient accumulation
-                scaler.scale(loss).backward()
-                
-                if (_ + 1) % accumulation_steps == 0:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad()
-                    scheduler.step()
+            actor_loss = -(weights * torch.min(surr1, surr2)).mean()
+            critic_loss = 0.5 * (weights * (values - target_values).pow(2)).mean()
+            entropy_loss = -0.01 * (weights * dist_entropy).mean()
 
-        # Update priorities in memory
+            loss = (actor_loss + critic_loss + entropy_loss) / accumulation_steps
+
+            # Gradient accumulation
+            scaler.scale(loss).backward()
+
+            if (step + 1) % accumulation_steps == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+                scheduler.step()
+
+            wandb.log({
+                "Actor Loss": actor_loss.item(),
+                "Critic Loss": critic_loss.item(),
+                "Entropy Loss": entropy_loss.item(),
+            })
+
+        # Update priorities
         priorities = advantages.abs().detach().cpu().numpy()
         memory.update_priorities(indices, priorities)
 
-    # Clear memory after all updates
+    # Clear memory after update
     memory.clear()
+
+
 
 def calculate_bounding_box(robot_x, robot_y, robot_yaw):
 
     # 机器人中心到边界的相对距离
-    half_length = 0.25
-    half_width = 0.25
+    half_length = 0.355
+    half_width = 0.303
 
     # 矩形的局部坐标系下的 4 个角点
     corners = np.array([
@@ -1221,6 +1240,17 @@ def save_movement_log_to_csv(movement_log, filename= f"/home/daniel/catkin_ws/sr
     print(f"Movement log saved to {filename}")
 
 def main():
+    wandb.init(
+        project="gazebo-rl",
+        config={
+            "learning_rate": LEARNING_RATE,
+            "batch_size": BATCH_SIZE,
+            "gamma": GAMMA,
+            "clip_param": CLIP_PARAM,
+            "ppo_epochs": PPO_EPOCHS,
+            "memory_size": MEMORY_SIZE
+        }
+    )
     env = GazeboEnv(None)
     dwa = DWA(goal=env.waypoints[env.current_waypoint_index + 3])
     model = ActorCritic(env.observation_space, env.action_space).to(device)
@@ -1295,9 +1325,11 @@ def main():
                 env.waypoint_failures.get(i, 0) > 1 for i in failure_range
             )
 
+            use_deep_rl_control = True  # test RL model 
+
             if use_deep_rl_control:
                 use_rl = True  # Mark this episode as using RL
-                action = select_action_with_exploration(env, state, model, epsilon=0.6 , dwa=dwa, obstacles=obstacles)
+                action = select_action_with_exploration(env, state, model, epsilon=0.0 , dwa=dwa, obstacles=obstacles)
                 action_np = action.detach().cpu().numpy().flatten()
                 print(f"RL Action at waypoint {env.current_waypoint_index}: {action_np}")
             else:
@@ -1306,22 +1338,27 @@ def main():
 
             next_state, reward, done, _ = env.step(action_np, obstacles=obstacles)
 
-            if not isinstance(next_state, torch.Tensor):
+            if isinstance(next_state, np.ndarray):
                 next_state = torch.tensor(next_state, dtype=torch.float32)
-            next_state = next_state.clone().detach().unsqueeze(0).to(device)
 
-            if use_deep_rl_control:
-                memory.add(state.cpu().numpy(), action_np, reward, done, next_state.cpu().numpy())
-                total_reward += reward
+                        # 确保维度正确
+            if next_state.dim() == 5:
+                next_state = next_state.squeeze(1)  # 去掉多余的维度
+            if next_state.dim() == 3:
+                next_state = next_state.unsqueeze(0)  # 增加 batch 维度
+
+            
+            memory.add(state.cpu().numpy(), action_np, reward, done, next_state.cpu().numpy())
+            total_reward += reward
 
             state = next_state
 
             state = (state - state.min()) / (state.max() - state.min() + 1e-5)
 
             elapsed_time = time.time() - start_time
-            if done or elapsed_time > 240:
-                if elapsed_time > 240:
-                    reward -= 10.0
+            if done or elapsed_time > 150:
+                if elapsed_time > 150:
+                    # reward -= 10.0
                     print(f"Episode {e} failed at time step {time_step}: time exceeded 240 sec.")
                 break
 
@@ -1329,6 +1366,15 @@ def main():
             print(123456)
             current_batch_size = min(BATCH_SIZE, len(memory.memory))
             ppo_update(PPO_EPOCHS, env, model, optimizer, memory, scaler, batch_size=current_batch_size,scheduler=scheduler)
+            
+        
+        if use_rl:
+            wandb.log({
+                "Episode": e,
+                "Total Reward": total_reward
+            })
+
+
 
         print(f"Episode {e}, Total Reward: {total_reward}, LR: {scheduler.get_last_lr()[0]}")
 
@@ -1336,7 +1382,7 @@ def main():
             best_test_reward = total_reward
             torch.save(model.state_dict(), best_model_path)
             print(f"New best model saved with reward: {best_test_reward}")
-            save_movement_log_to_csv(movement_log)
+            # save_movement_log_to_csv(movement_log)
 
         if e % 5 == 0:
             torch.save(model.state_dict(), model_path)
